@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "stock-finder"
+version = "0.1.0"
+description = "Stock Analysis Tool based on fund flow and user discussions"
+authors = ["User <user@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+akshare = "^1.16.95"
+pandas = "^2.2.3"
+numpy = "^2.2.6"
+matplotlib = "^3.10.3"
+langchain = "^0.3.25"
+langchain-openai = "^0.3.18"
+openai = "^1.82.0"
+requests = "^2.32.3"
+beautifulsoup4 = "^4.13.4"
+python-dotenv = "^1.1.0"
+tqdm = "^4.67.1"
+jieba = "^0.42.1"
+scikit-learn = "^1.6.1"
+streamlit = "^1.45.1"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+black = "^24.1.0"
+isort = "^5.13.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
