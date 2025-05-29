@@ -7,9 +7,9 @@ Streamlit Web应用入口
 
 import os
 import sys
-import logging
 from pathlib import Path
 from dotenv import load_dotenv
+from loguru import logger
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -22,16 +22,9 @@ sys.path.append(str(project_root))
 # 加载环境变量
 load_dotenv()
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(f"{project_root}/logs/app.log", mode='a')
-    ]
-)
-logger = logging.getLogger(__name__)
+# 配置loguru
+logger.remove()  # 移除默认的sink
+logger.add(sys.stdout, colorize=True, format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>")
 
 from src.agents.agent_manager import AgentManager
 from src.data_fetchers.data_manager import DataManager
@@ -68,7 +61,7 @@ def run_analysis():
             return results
         
         except Exception as e:
-            logger.error(f"分析过程出错: {e}", exc_info=True)
+            logger.error(f"分析过程出错: {e}")
             st.error(f"分析过程出错: {str(e)}")
             return []
 
@@ -168,9 +161,6 @@ with st.sidebar:
 
 # 主界面
 if run_button:
-    # 创建logs目录
-    Path(f"{project_root}/logs").mkdir(exist_ok=True)
-    
     # 运行分析
     results = run_analysis()
     

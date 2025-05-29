@@ -6,7 +6,6 @@ Agent管理器模块：负责协调各个智能体
 """
 
 import os
-import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -15,16 +14,18 @@ import json
 from pathlib import Path
 import time
 from dotenv import load_dotenv
+from loguru import logger
 
-from langchain.llms import OpenAI
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
-from langchain.prompts import PromptTemplate
+# 更新LangChain导入
+from langchain_community.llms import OpenAI
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+# 使用langchain包中的模块
 from langchain.chains import LLMChain
 from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
 from langchain.memory import ConversationBufferMemory
-
-logger = logging.getLogger(__name__)
 
 # 加载环境变量
 load_dotenv()
@@ -63,22 +64,38 @@ class AgentManager:
             LLM实例
         """
         try:
-            model_name = os.getenv("MODEL_NAME", "gpt-4")
+            # 从.env文件获取配置
+            model_name = os.getenv("MODEL_NAME", "qwen-plus")
             temperature = float(os.getenv("TEMPERATURE", "0.7"))
+            api_key = os.getenv("OPENAI_API_KEY")
+            api_base = os.getenv("OPENAI_API_BASE")  # OpenAI兼容API基础URL
+            
+            # 检查API密钥是否设置
+            if not api_key or api_key == "your_openai_api_key":
+                logger.warning("未设置有效的OpenAI API密钥，LLM功能将被禁用")
+                return None
+                
+            # 检查API基础URL是否设置
+            if not api_base:
+                logger.warning("未设置OpenAI API基础URL，将使用默认URL")
             
             logger.info(f"初始化LLM，模型: {model_name}, 温度: {temperature}")
+            logger.info(f"使用API基础URL: {api_base}")
             
+            # 使用OpenAI兼容模式配置
             llm = ChatOpenAI(
                 model_name=model_name,
                 temperature=temperature,
-                openai_api_key=os.getenv("OPENAI_API_KEY")
+                api_key=api_key,
+                base_url=api_base,  # 使用自定义的API基础URL
+                max_tokens=int(os.getenv("MAX_TOKENS", "4096"))
             )
             
             return llm
         
         except Exception as e:
             logger.error(f"初始化LLM失败: {e}")
-            # 返回一个模拟的LLM，避免程序崩溃
+            # 返回None，禁用LLM功能
             return None
     
     def _init_data_collection_agent(self):
@@ -89,53 +106,43 @@ class AgentManager:
         """
         logger.info("初始化数据收集Agent")
         
-        # 这里返回一个简单的函数而不是真正的Agent，因为我们已经有了数据管理器
-        def collect_data(stock_list=None):
-            """收集股票数据
-            
-            Args:
-                stock_list: 股票代码列表，如果为None则获取所有股票
-                
-            Returns:
-                dict: 包含各类数据的字典
-            """
-            logger.info("数据收集Agent开始工作")
-            
-            try:
-                # 获取股票列表
-                if stock_list is None:
-                    all_stocks = self.data_manager.get_stock_list()
-                    stock_list = all_stocks['代码'].tolist()
-                
-                # 获取资金流向数据
-                fund_flow_data = self.data_manager.get_fund_flow_data()
-                
-                # 获取社交媒体讨论数据
-                social_data = self.data_manager.get_social_discussion_data()
-                
-                # 获取基本面数据
-                fundamental_data = self.data_manager.get_stock_fundamental_data(stock_list)
-                
-                # 获取行业数据
-                industry_data = self.data_manager.get_industry_data()
-                
-                # 获取股票行业对应关系
-                stock_industry_mapping = self.data_manager.get_stock_industry_mapping()
-                
-                return {
-                    'stock_list': stock_list,
-                    'fund_flow_data': fund_flow_data,
-                    'social_data': social_data,
-                    'fundamental_data': fundamental_data,
-                    'industry_data': industry_data,
-                    'stock_industry_mapping': stock_industry_mapping
-                }
-            
-            except Exception as e:
-                logger.error(f"数据收集Agent工作失败: {e}")
-                return {}
+        # 返回self.collect_data方法
+        return self.collect_data
+    
+    def collect_data(self, stock_list=None):
+        """收集股票数据
         
-        return collect_data
+        Args:
+            stock_list: 股票代码列表，如果为None则获取所有股票
+            
+        Returns:
+            dict: 包含各类数据的字典
+        """
+        logger.info("数据收集Agent开始工作")
+        
+        try:
+            # 获取股票列表
+            if stock_list is None:
+                all_stocks = self.data_manager.get_stock_list()
+                # 检查列名，确保使用正确的列名
+                code_column = '代码' if '代码' in all_stocks.columns else 'code'
+                stock_list = all_stocks[code_column].tolist()
+            
+            # 收集各类数据
+            collected_data = {
+                'stock_list': self.data_manager.get_stock_list(),
+                'fund_flow_data': self.data_manager.get_fund_flow_data(),
+                'social_data': self.data_manager.get_social_discussion_data(),
+                'industry_data': self.data_manager.get_industry_data(),
+                'stock_industry_mapping': self.data_manager.get_stock_industry_mapping()
+            }
+            
+            logger.info("数据收集完成")
+            return collected_data
+            
+        except Exception as e:
+            logger.error(f"数据收集Agent工作失败: {e}")
+            raise
     
     def _init_analysis_agent(self):
         """初始化分析Agent
@@ -166,6 +173,23 @@ class AgentManager:
                 industry_data = data.get('industry_data', pd.DataFrame())
                 stock_industry_mapping = data.get('stock_industry_mapping', pd.DataFrame())
                 
+                # 确保DataFrame有正确的列名
+                # 检查并标准化fund_flow_data的列名
+                if not fund_flow_data.empty and '代码' not in fund_flow_data.columns and 'code' in fund_flow_data.columns:
+                    fund_flow_data = fund_flow_data.rename(columns={'code': '代码'})
+                
+                # 检查并标准化social_data的列名
+                if not social_data.empty and '代码' not in social_data.columns and 'code' in social_data.columns:
+                    social_data = social_data.rename(columns={'code': '代码'})
+                
+                # 检查并标准化fundamental_data的列名
+                if not fundamental_data.empty and '代码' not in fundamental_data.columns and 'code' in fundamental_data.columns:
+                    fundamental_data = fundamental_data.rename(columns={'code': '代码'})
+                
+                # 检查并标准化stock_industry_mapping的列名
+                if not stock_industry_mapping.empty and '代码' not in stock_industry_mapping.columns and 'code' in stock_industry_mapping.columns:
+                    stock_industry_mapping = stock_industry_mapping.rename(columns={'code': '代码'})
+                
                 # 分析资金流向
                 fund_flow_scores = self.analyzer_manager.analyze_fund_flow(fund_flow_data)
                 
@@ -194,7 +218,17 @@ class AgentManager:
                 
                 # 获取股票名称
                 stock_info = self.data_manager.get_stock_list()
-                result = pd.merge(result, stock_info, on='代码', how='left')
+                # 检查列名
+                name_column = '名称' if '名称' in stock_info.columns else 'name'
+                code_column = '代码' if '代码' in stock_info.columns else 'code'
+                
+                # 重命名列以确保匹配
+                stock_info_renamed = stock_info.rename(columns={
+                    code_column: '代码',
+                    name_column: '名称'
+                })
+                
+                result = pd.merge(result, stock_info_renamed[['代码', '名称']], on='代码', how='left')
                 
                 # 转换为列表
                 result_list = []
@@ -243,47 +277,44 @@ class AgentManager:
         logger.info("初始化推荐Agent")
         
         # 这里我们使用LLM来生成推荐理由
-        def recommend_stocks(analyzed_stocks, top_n=10, min_score=60):
+        def recommend_stocks(results):
             """推荐股票
             
             Args:
-                analyzed_stocks: 分析后的股票列表
-                top_n: 推荐的股票数量
-                min_score: 最低潜力评分
+                results: 分析结果列表
                 
             Returns:
-                list: 推荐的股票列表
+                list: 包含推荐股票信息的列表
             """
-            logger.info(f"推荐Agent开始工作，推荐数量: {top_n}, 最低评分: {min_score}")
+            logger.info(f"推荐Agent开始工作，推荐数量: {len(results)}, 最低评分: {min([r['total_score'] for r in results]) if results else 0}")
             
             try:
-                # 筛选评分达到最低要求的股票
-                qualified_stocks = [s for s in analyzed_stocks if s['potential_score'] >= min_score]
-                
-                # 按潜力评分排序
-                sorted_stocks = sorted(qualified_stocks, key=lambda x: x['potential_score'], reverse=True)
-                
-                # 取前N个
-                top_stocks = sorted_stocks[:top_n]
+                # 如果没有配置OpenAI API，跳过生成推荐理由
+                if not self.llm:
+                    logger.warning("未配置OpenAI API，跳过生成推荐理由")
+                    return results
                 
                 # 为每只股票生成推荐理由
-                for stock in top_stocks:
-                    stock['reason'] = self.analyzer_manager.generate_recommendation_reason(stock)
-                    
-                    # 如果有LLM，使用LLM增强推荐理由
-                    if self.llm:
-                        try:
-                            enhanced_reason = self._enhance_recommendation_reason(stock)
-                            if enhanced_reason:
-                                stock['reason'] = enhanced_reason
-                        except Exception as e:
-                            logger.warning(f"使用LLM增强推荐理由失败: {e}")
+                for stock in results:
+                    try:
+                        # 准备提示词
+                        prompt = self._prepare_stock_prompt(stock)
+                        
+                        # 调用LLM生成推荐理由
+                        reason = self._generate_recommendation_reason(prompt)
+                        
+                        # 添加到结果中
+                        stock['reason'] = reason
+                        
+                    except Exception as e:
+                        logger.error(f"为股票 {stock['code']} 生成推荐理由失败: {e}")
+                        stock['reason'] = "无法生成推荐理由"
                 
-                return top_stocks
+                return results
             
             except Exception as e:
                 logger.error(f"推荐Agent工作失败: {e}")
-                return []
+                return results
         
         return recommend_stocks
     
@@ -322,41 +353,279 @@ class AgentManager:
                 HumanMessage(content=prompt)
             ]
             
-            response = self.llm.generate([messages])
-            enhanced_reason = response.generations[0][0].text.strip()
+            # 使用新版API，添加超时处理
+            import time
+            from requests.exceptions import Timeout, RequestException
             
-            return enhanced_reason
+            max_retries = 3
+            retry_delay = 2
+            
+            for attempt in range(max_retries):
+                try:
+                    # 设置超时时间
+                    response = self.llm.invoke(messages, timeout=30)
+                    enhanced_reason = response.content
+                    return enhanced_reason
+                except Timeout:
+                    logger.warning(f"LLM请求超时，尝试重试 {attempt+1}/{max_retries}")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避
+                    else:
+                        logger.error("LLM请求多次超时，使用原始推荐理由")
+                        return stock_data['reason']
+                except RequestException as e:
+                    logger.error(f"LLM请求错误: {e}")
+                    return stock_data['reason']
+                except Exception as e:
+                    logger.error(f"增强推荐理由失败: {e}")
+                    return stock_data['reason']
+            
+            return stock_data['reason']  # 如果所有尝试都失败，返回原始理由
         
         except Exception as e:
             logger.warning(f"增强推荐理由失败: {e}")
-            return None
+            return stock_data['reason']  # 返回原始推荐理由
     
-    def run_analysis_pipeline(self, stock_list=None, top_n=10, min_score=60):
+    def run_analysis_pipeline(self, top_n=10, min_score=60, max_stocks_to_process=20):
         """运行完整的分析流程
         
         Args:
-            stock_list: 股票代码列表，如果为None则分析所有股票
             top_n: 推荐的股票数量
-            min_score: 最低潜力评分
+            min_score: 最低推荐评分
+            max_stocks_to_process: 最大处理的股票数量，避免API调用过多
             
         Returns:
-            list: 推荐的股票列表
+            list: 包含推荐股票信息的列表
         """
-        logger.info(f"开始运行分析流程，股票数量: {len(stock_list) if stock_list else '全部'}, 推荐数量: {top_n}")
-        
-        # 1. 收集数据
-        data = self.data_collection_agent(stock_list)
-        
-        # 2. 分析数据
-        analyzed_stocks = self.analysis_agent(data)
-        
-        # 3. 推荐股票
-        recommended_stocks = self.recommendation_agent(analyzed_stocks, top_n, min_score)
-        
-        # 4. 缓存结果
-        self._cache_results(recommended_stocks)
-        
-        return recommended_stocks
+        try:
+            # 收集数据
+            data = self.collect_data()
+            
+            # 先分析资金流向和社交热度数据，这两个不需要逐只股票API调用
+            logger.info("分析资金流向数据...")
+            fund_flow_scores = self.analyzer_manager.analyze_fund_flow(data.get('fund_flow_data', pd.DataFrame()))
+            
+            # 确保代码列是字符串类型
+            if not fund_flow_scores.empty and '代码' in fund_flow_scores.columns:
+                fund_flow_scores['代码'] = fund_flow_scores['代码'].astype(str)
+            
+            logger.info("分析社交热度数据...")
+            social_scores = self.analyzer_manager.analyze_social_discussion(data.get('social_data', pd.DataFrame()))
+            
+            # 确保代码列是字符串类型
+            if not social_scores.empty and '代码' in social_scores.columns:
+                social_scores['代码'] = social_scores['代码'].astype(str)
+            
+            # 合并初步评分，筛选出有热度的股票
+            initial_scores = pd.DataFrame()
+            
+            if not fund_flow_scores.empty:
+                if initial_scores.empty:
+                    initial_scores = fund_flow_scores.copy()
+                else:
+                    initial_scores = pd.merge(initial_scores, fund_flow_scores, on='代码', how='outer')
+            
+            if not social_scores.empty:
+                if initial_scores.empty:
+                    initial_scores = social_scores.copy()
+                else:
+                    initial_scores = pd.merge(initial_scores, social_scores, on='代码', how='outer')
+            
+            # 计算初步评分（资金流向和社交热度的加权平均值）
+            if not initial_scores.empty:
+                # 填充缺失值
+                if 'fund_flow_score' in initial_scores.columns:
+                    initial_scores['fund_flow_score'] = initial_scores['fund_flow_score'].fillna(50)
+                else:
+                    initial_scores['fund_flow_score'] = 50
+                
+                if 'social_score' in initial_scores.columns:
+                    initial_scores['social_score'] = initial_scores['social_score'].fillna(50)
+                else:
+                    initial_scores['social_score'] = 50
+                
+                # 计算加权平均
+                fund_flow_weight = self.analyzer_manager.weights['fund_flow']
+                social_weight = self.analyzer_manager.weights['social']
+                total_weight = fund_flow_weight + social_weight
+                
+                initial_scores['initial_score'] = (
+                    initial_scores['fund_flow_score'] * fund_flow_weight + 
+                    initial_scores['social_score'] * social_weight
+                ) / total_weight
+                
+                # 筛选出初步评分较高的股票（例如前100名）作为候选
+                candidate_stocks = initial_scores.sort_values('initial_score', ascending=False).head(100)
+                candidate_stock_codes = candidate_stocks['代码'].tolist()
+                
+                logger.info(f"初步筛选出 {len(candidate_stock_codes)} 只有热度的股票进行深入分析")
+            else:
+                logger.warning("初步评分为空，将分析所有股票")
+                stock_list = data.get('stock_list')
+                if stock_list is not None and not stock_list.empty and '代码' in stock_list.columns:
+                    # 确保代码列是字符串类型
+                    stock_list['代码'] = stock_list['代码'].astype(str)
+                    candidate_stock_codes = stock_list['代码'].tolist()
+                else:
+                    logger.error("无法获取股票列表")
+                    return []
+                
+                if len(candidate_stock_codes) > 100:
+                    logger.warning(f"股票数量过多 ({len(candidate_stock_codes)})，将限制为前100只")
+                    candidate_stock_codes = candidate_stock_codes[:100]
+            
+            # 限制处理的股票数量，避免API调用过多
+            if len(candidate_stock_codes) > max_stocks_to_process:
+                logger.info(f"限制处理的股票数量为 {max_stocks_to_process} 只")
+                candidate_stock_codes = candidate_stock_codes[:max_stocks_to_process]
+            
+            # 只对候选股票进行详细分析
+            logger.info("开始对候选股票进行详细分析...")
+            results = []
+            
+            # 获取基本面数据（这个通常是批量获取的，不需要逐只股票调用API）
+            logger.info("获取基本面数据...")
+            fundamental_data = self.data_manager.get_stock_fundamental_data(candidate_stock_codes)
+            
+            # 确保代码列是字符串类型
+            if not fundamental_data.empty and '代码' in fundamental_data.columns:
+                fundamental_data['代码'] = fundamental_data['代码'].astype(str)
+            
+            logger.info("分析基本面数据...")
+            fundamental_scores = self.analyzer_manager.analyze_fundamental(fundamental_data)
+            
+            # 确保代码列是字符串类型
+            if not fundamental_scores.empty and '代码' in fundamental_scores.columns:
+                fundamental_scores['代码'] = fundamental_scores['代码'].astype(str)
+            
+            # 获取行业数据
+            logger.info("获取行业数据...")
+            industry_data = data.get('industry_data', pd.DataFrame())
+            stock_industry_mapping = data.get('stock_industry_mapping', pd.DataFrame())
+            
+            # 确保代码列是字符串类型
+            if not stock_industry_mapping.empty and '代码' in stock_industry_mapping.columns:
+                stock_industry_mapping['代码'] = stock_industry_mapping['代码'].astype(str)
+            
+            logger.info("分析行业数据...")
+            industry_scores = self.analyzer_manager.analyze_industry(industry_data, stock_industry_mapping)
+            
+            # 确保代码列是字符串类型
+            if not industry_scores.empty and '代码' in industry_scores.columns:
+                industry_scores['代码'] = industry_scores['代码'].astype(str)
+            
+            # 逐只分析候选股票的技术面
+            total_stocks = len(candidate_stock_codes)
+            success_count = 0
+            error_count = 0
+            
+            logger.info(f"开始逐只分析 {total_stocks} 只股票的技术面数据...")
+            
+            for i, stock_code in enumerate(candidate_stock_codes):
+                try:
+                    # 记录进度
+                    logger.info(f"正在分析第 {i+1}/{total_stocks} 只股票: {stock_code} (成功: {success_count}, 失败: {error_count})")
+                    
+                    # 确保股票代码是字符串类型
+                    stock_code = str(stock_code)
+                    
+                    # 获取并分析技术面数据
+                    technical_data = self.data_manager.get_stock_technical_data(stock_code)
+                    technical_score = self.analyzer_manager.analyze_technical(stock_code, technical_data)
+                    
+                    # 合并该股票的所有评分
+                    stock_scores = {}
+                    
+                    # 添加资金流向评分
+                    if not fund_flow_scores.empty and stock_code in fund_flow_scores['代码'].values:
+                        stock_fund_flow = fund_flow_scores[fund_flow_scores['代码'] == stock_code]
+                        if not stock_fund_flow.empty:
+                            stock_scores['fund_flow_score'] = float(stock_fund_flow['fund_flow_score'].values[0])
+                    else:
+                        stock_scores['fund_flow_score'] = 50
+                    
+                    # 添加社交热度评分
+                    if not social_scores.empty and stock_code in social_scores['代码'].values:
+                        stock_social = social_scores[social_scores['代码'] == stock_code]
+                        if not stock_social.empty:
+                            stock_scores['social_score'] = float(stock_social['social_score'].values[0])
+                    else:
+                        stock_scores['social_score'] = 50
+                    
+                    # 添加基本面评分
+                    if not fundamental_scores.empty and stock_code in fundamental_scores['代码'].values:
+                        stock_fundamental = fundamental_scores[fundamental_scores['代码'] == stock_code]
+                        if not stock_fundamental.empty:
+                            stock_scores['fundamental_score'] = float(stock_fundamental['fundamental_score'].values[0])
+                    else:
+                        stock_scores['fundamental_score'] = 50
+                    
+                    # 添加行业评分
+                    if not industry_scores.empty and stock_code in industry_scores['代码'].values:
+                        stock_industry = industry_scores[industry_scores['代码'] == stock_code]
+                        if not stock_industry.empty:
+                            stock_scores['industry_score'] = float(stock_industry['industry_score'].values[0])
+                    else:
+                        stock_scores['industry_score'] = 50
+                    
+                    # 添加技术面评分
+                    stock_scores['technical_score'] = technical_score if isinstance(technical_score, (int, float)) else 50
+                    
+                    # 获取股票名称
+                    stock_name = ""
+                    if 'stock_list' in data and not data['stock_list'].empty:
+                        # 确保代码列是字符串类型
+                        data['stock_list']['代码'] = data['stock_list']['代码'].astype(str)
+                        stock_info = data['stock_list'][data['stock_list']['代码'] == stock_code]
+                        if not stock_info.empty and '名称' in stock_info.columns:
+                            stock_name = stock_info['名称'].values[0]
+                    
+                    # 计算综合评分（使用分析器管理器的权重）
+                    potential_score = self.analyzer_manager.calculate_potential_score(stock_scores)
+                    
+                    # 添加到结果列表
+                    results.append({
+                        'code': stock_code,
+                        'name': stock_name,
+                        'fund_flow_score': stock_scores.get('fund_flow_score', 50),
+                        'social_score': stock_scores.get('social_score', 50),
+                        'fundamental_score': stock_scores.get('fundamental_score', 50),
+                        'technical_score': stock_scores.get('technical_score', 50),
+                        'industry_score': stock_scores.get('industry_score', 50),
+                        'potential_score': potential_score
+                    })
+                    
+                    success_count += 1
+                    
+                except Exception as e:
+                    logger.warning(f"分析股票 {stock_code} 时出错: {e}")
+                    error_count += 1
+            
+            logger.info(f"股票分析完成，共 {total_stocks} 只，成功 {success_count} 只，失败 {error_count} 只")
+            
+            # 按潜力评分排序
+            results = sorted(results, key=lambda x: x['potential_score'], reverse=True)
+            
+            # 筛选符合最低评分要求的股票
+            results = [r for r in results if r['potential_score'] >= min_score]
+            
+            # 取前N名
+            results = results[:top_n]
+            
+            # 生成推荐理由
+            if hasattr(self, 'recommendation_agent') and callable(self.recommendation_agent):
+                results = self.recommendation_agent(results)
+            
+            # 缓存结果
+            self._cache_results(results)
+            
+            return results
+        except Exception as e:
+            logger.error(f"分析流程执行失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
     
     def _cache_results(self, results):
         """缓存分析结果
@@ -414,4 +683,58 @@ class AgentManager:
         
         except Exception as e:
             logger.error(f"获取缓存结果失败: {e}")
-            return [] 
+            return []
+    
+    def _prepare_stock_prompt(self, stock):
+        """准备股票推荐提示词
+        
+        Args:
+            stock: 股票信息字典
+            
+        Returns:
+            str: 提示词
+        """
+        prompt = f"""请为以下股票生成一段专业的投资推荐理由，字数控制在200字以内：
+
+股票代码：{stock['code']}
+股票名称：{stock['name']}
+
+评分情况：
+"""
+        
+        # 添加各项评分
+        for score_name, score_value in stock['scores'].items():
+            # 将评分名称转换为更易读的形式
+            readable_name = {
+                'fund_flow_score': '资金流向',
+                'social_score': '社交热度',
+                'fundamental_score': '基本面',
+                'industry_score': '行业表现',
+                'technical_score': '技术面'
+            }.get(score_name, score_name)
+            
+            prompt += f"- {readable_name}评分：{score_value:.2f}/100\n"
+        
+        prompt += f"\n总评分：{stock['total_score']:.2f}/100\n\n"
+        prompt += "请根据以上评分，分析该股票的投资价值，并给出推荐理由。语言要专业、简洁，重点突出其投资亮点和潜在风险。"
+        
+        return prompt
+    
+    def _generate_recommendation_reason(self, prompt):
+        """使用LLM生成推荐理由
+        
+        Args:
+            prompt: 提示词
+            
+        Returns:
+            str: 生成的推荐理由
+        """
+        try:
+            # 使用LangChain调用OpenAI API
+            response = self.llm.invoke(prompt)
+            
+            # 返回生成的文本
+            return response.content
+        except Exception as e:
+            logger.error(f"生成推荐理由失败: {e}")
+            return "无法生成推荐理由，请检查API配置或网络连接。" 

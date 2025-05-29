@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Stock Analysis Tool based on fund flow and user discussions"
 authors = ["User <user@example.com>"]
 readme = "README.md"
+packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.12"
@@ -21,6 +22,10 @@ tqdm = "^4.67.1"
 jieba = "^0.42.1"
 scikit-learn = "^1.6.1"
 streamlit = "^1.45.1"
+loguru = "^0.7.3"
+langchain-community = "^0.3.24"
+langchain-core = "^0.3.62"
+
 
 
 [tool.poetry.group.dev.dependencies]

@@ -6,7 +6,6 @@
 """
 
 import os
-import logging
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -14,8 +13,8 @@ from sklearn.preprocessing import MinMaxScaler
 import jieba
 from sklearn.feature_extraction.text import TfidfVectorizer
 from collections import Counter
-
-logger = logging.getLogger(__name__)
+from loguru import logger
+import akshare as ak
 
 class AnalyzerManager:
     """分析器管理器：负责协调各种分析器，对数据进行综合分析"""
@@ -45,42 +44,99 @@ class AnalyzerManager:
         logger.info("分析资金流向数据")
         
         try:
+            # 检查数据是否为空
+            if fund_flow_data.empty:
+                logger.warning("资金流向数据为空")
+                return pd.DataFrame(columns=['代码', 'fund_flow_score'])
+            
             # 复制数据，避免修改原始数据
             df = fund_flow_data.copy()
             
-            # 确保必要的列存在
-            required_columns = ['代码', '主力净流入-净额', '超大单净流入-净额', '大单净流入-净额']
-            for col in required_columns:
-                if col not in df.columns:
-                    logger.error(f"资金流向数据缺少必要的列: {col}")
-                    return pd.DataFrame(columns=['代码', 'fund_flow_score'])
+            # 检查必要的列是否存在
+            if '代码' not in df.columns:
+                logger.error("资金流向数据缺少代码列")
+                return pd.DataFrame(columns=['代码', 'fund_flow_score'])
             
-            # 计算资金流向评分
-            # 1. 主力净流入评分
+            # 初始化评分列
+            df['fund_flow_score'] = 50  # 默认评分
+            
+            # 创建MinMaxScaler用于归一化
             scaler = MinMaxScaler(feature_range=(0, 100))
             
-            # 处理主力净流入-净额
+            # 处理主力净流入-净额（如果存在）
             if '主力净流入-净额' in df.columns:
+                # 转换为数值类型
+                df['主力净流入-净额'] = pd.to_numeric(df['主力净流入-净额'], errors='coerce')
+                # 填充缺失值
+                df['主力净流入-净额'] = df['主力净流入-净额'].fillna(0)
+                # 归一化
                 df['主力净流入评分'] = scaler.fit_transform(df['主力净流入-净额'].values.reshape(-1, 1)).flatten()
             else:
-                df['主力净流入评分'] = 0
+                df['主力净流入评分'] = 50
             
-            # 处理超大单净流入-净额
+            # 处理超大单净流入-净额（如果存在）
             if '超大单净流入-净额' in df.columns:
+                # 转换为数值类型
+                df['超大单净流入-净额'] = pd.to_numeric(df['超大单净流入-净额'], errors='coerce')
+                # 填充缺失值
+                df['超大单净流入-净额'] = df['超大单净流入-净额'].fillna(0)
+                # 归一化
                 df['超大单净流入评分'] = scaler.fit_transform(df['超大单净流入-净额'].values.reshape(-1, 1)).flatten()
             else:
-                df['超大单净流入评分'] = 0
+                df['超大单净流入评分'] = 50
             
-            # 处理大单净流入-净额
+            # 处理大单净流入-净额（如果存在）
             if '大单净流入-净额' in df.columns:
+                # 转换为数值类型
+                df['大单净流入-净额'] = pd.to_numeric(df['大单净流入-净额'], errors='coerce')
+                # 填充缺失值
+                df['大单净流入-净额'] = df['大单净流入-净额'].fillna(0)
+                # 归一化
                 df['大单净流入评分'] = scaler.fit_transform(df['大单净流入-净额'].values.reshape(-1, 1)).flatten()
             else:
-                df['大单净流入评分'] = 0
+                df['大单净流入评分'] = 50
             
-            # 综合评分：主力净流入(50%) + 超大单净流入(30%) + 大单净流入(20%)
-            df['fund_flow_score'] = (df['主力净流入评分'] * 0.5 + 
-                                     df['超大单净流入评分'] * 0.3 + 
-                                     df['大单净流入评分'] * 0.2)
+            # 处理其他可能存在的资金流指标
+            # 净流入金额（如果存在）
+            if '净流入金额' in df.columns:
+                # 转换为数值类型
+                df['净流入金额'] = pd.to_numeric(df['净流入金额'], errors='coerce')
+                # 填充缺失值
+                df['净流入金额'] = df['净流入金额'].fillna(0)
+                # 归一化
+                df['净流入评分'] = scaler.fit_transform(df['净流入金额'].values.reshape(-1, 1)).flatten()
+            else:
+                df['净流入评分'] = 50
+            
+            # 综合评分计算
+            # 根据可用的指标动态调整权重
+            weights = {}
+            available_indicators = ['主力净流入评分', '超大单净流入评分', '大单净流入评分', '净流入评分']
+            available_count = sum(1 for ind in available_indicators if ind in df.columns)
+            
+            if available_count == 0:
+                logger.warning("没有可用的资金流指标，使用默认评分")
+                return pd.DataFrame({'代码': df['代码'], 'fund_flow_score': 50})
+            
+            # 设置权重
+            if '主力净流入评分' in df.columns:
+                weights['主力净流入评分'] = 0.5
+            if '超大单净流入评分' in df.columns:
+                weights['超大单净流入评分'] = 0.3
+            if '大单净流入评分' in df.columns:
+                weights['大单净流入评分'] = 0.2
+            if '净流入评分' in df.columns:
+                weights['净流入评分'] = 0.5 if '主力净流入评分' not in df.columns else 0.0
+            
+            # 归一化权重
+            total_weight = sum(weights.values())
+            if total_weight > 0:
+                weights = {k: v/total_weight for k, v in weights.items()}
+            
+            # 计算加权评分
+            df['fund_flow_score'] = 0
+            for indicator, weight in weights.items():
+                df['fund_flow_score'] += df[indicator] * weight
             
             # 返回结果
             return df[['代码', 'fund_flow_score']]
@@ -101,20 +157,93 @@ class AnalyzerManager:
         logger.info("分析社交媒体讨论数据")
         
         try:
+            # 检查数据是否为空
+            if social_data.empty:
+                logger.warning("社交媒体讨论数据为空")
+                return pd.DataFrame(columns=['代码', 'social_score'])
+            
             # 复制数据，避免修改原始数据
             df = social_data.copy()
             
             # 确保必要的列存在
-            if '代码' not in df.columns or '讨论数量' not in df.columns:
-                logger.error("社交媒体讨论数据缺少必要的列")
+            if '代码' not in df.columns:
+                logger.error("社交媒体讨论数据缺少代码列")
                 return pd.DataFrame(columns=['代码', 'social_score'])
             
-            # 计算社交热度评分
+            # 初始化评分列
+            df['social_score'] = 50  # 默认评分
+            
+            # 创建MinMaxScaler用于归一化
             scaler = MinMaxScaler(feature_range=(0, 100))
-            df['social_score'] = scaler.fit_transform(df['讨论数量'].values.reshape(-1, 1)).flatten()
+            
+            # 检查可能的热度指标列
+            heat_indicators = []
+            
+            # 检查讨论数量列
+            if '讨论数量' in df.columns:
+                df['讨论数量'] = pd.to_numeric(df['讨论数量'], errors='coerce').fillna(0)
+                heat_indicators.append('讨论数量')
+            
+            # 检查人气指数列
+            if '人气指数' in df.columns:
+                df['人气指数'] = pd.to_numeric(df['人气指数'], errors='coerce').fillna(0)
+                heat_indicators.append('人气指数')
+            
+            # 如果没有任何热度指标，返回默认评分
+            if not heat_indicators:
+                logger.warning("没有找到任何热度指标，使用默认评分")
+                return pd.DataFrame({'代码': df['代码'].unique(), 'social_score': 50})
+            
+            # 为每个热度指标计算归一化评分
+            for indicator in heat_indicators:
+                score_name = f"{indicator}_score"
+                df[score_name] = scaler.fit_transform(df[indicator].values.reshape(-1, 1)).flatten()
+            
+            # 考虑热度来源的权重
+            if '热度来源' in df.columns:
+                # 设置不同来源的权重
+                source_weights = {
+                    '人气榜': 1.0,
+                    '飙升榜': 1.2,  # 飙升榜权重更高，表示更有潜力
+                    '新浪股吧': 0.8
+                }
+                
+                # 应用来源权重
+                for source, weight in source_weights.items():
+                    mask = df['热度来源'] == source
+                    for indicator in heat_indicators:
+                        score_name = f"{indicator}_score"
+                        if score_name in df.columns:
+                            df.loc[mask, score_name] = df.loc[mask, score_name] * weight
+            
+            # 对于有多个热度指标的股票，计算平均评分
+            # 首先，为每个股票和每个指标创建一个临时DataFrame
+            temp_dfs = []
+            for indicator in heat_indicators:
+                score_name = f"{indicator}_score"
+                if score_name in df.columns:
+                    temp_df = df.groupby('代码')[score_name].mean().reset_index()
+                    temp_df.rename(columns={score_name: f"avg_{score_name}"}, inplace=True)
+                    temp_dfs.append(temp_df)
+            
+            # 合并所有临时DataFrame
+            if temp_dfs:
+                result_df = temp_dfs[0]
+                for temp_df in temp_dfs[1:]:
+                    result_df = pd.merge(result_df, temp_df, on='代码', how='outer')
+                
+                # 计算所有指标的平均值作为最终社交评分
+                score_columns = [col for col in result_df.columns if col.startswith('avg_')]
+                if score_columns:
+                    result_df['social_score'] = result_df[score_columns].mean(axis=1)
+                else:
+                    result_df['social_score'] = 50
+            else:
+                # 如果没有任何热度指标，使用默认评分
+                result_df = pd.DataFrame({'代码': df['代码'].unique(), 'social_score': 50})
             
             # 返回结果
-            return df[['代码', 'social_score']]
+            return result_df[['代码', 'social_score']]
         
         except Exception as e:
             logger.error(f"分析社交媒体讨论数据失败: {e}")
@@ -194,15 +323,30 @@ class AnalyzerManager:
         logger.info(f"分析股票 {stock_code} 技术面数据")
         
         try:
+            # 检查数据是否为空
+            if technical_data is None or technical_data.empty:
+                logger.warning(f"股票 {stock_code} 技术面数据为空")
+                return 50.0  # 返回默认评分
+            
             # 复制数据，避免修改原始数据
             df = technical_data.copy()
             
             # 确保必要的列存在
             required_columns = ['日期', '收盘', '开盘', '最高', '最低', '成交量']
-            for col in required_columns:
-                if col not in df.columns:
-                    logger.error(f"技术面数据缺少必要的列: {col}")
-                    return 50.0  # 返回默认评分
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            if missing_columns:
+                logger.error(f"技术面数据缺少必要的列: {missing_columns}")
+                return 50.0  # 返回默认评分
+            
+            # 确保数据类型正确
+            for col in ['收盘', '开盘', '最高', '最低']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            df['成交量'] = pd.to_numeric(df['成交量'], errors='coerce')
+            
+            # 检查数据是否足够
+            if len(df) < 20:
+                logger.warning(f"股票 {stock_code} 技术面数据不足，仅有 {len(df)} 条记录")
+                return 50.0  # 返回默认评分
             
             # 计算技术指标
             # 1. 计算5日、10日、20日移动平均线
@@ -222,59 +366,76 @@ class AnalyzerManager:
             loss = -delta.where(delta < 0, 0)
             avg_gain = gain.rolling(window=14).mean()
             avg_loss = loss.rolling(window=14).mean()
+            # 避免除零错误
+            avg_loss = avg_loss.replace(0, 0.001)
             rs = avg_gain / avg_loss
             df['RSI'] = 100 - (100 / (1 + rs))
             
             # 获取最近的数据进行评分
-            latest = df.iloc[-1]
+            # 确保有足够的数据用于评分
+            if df.iloc[-1:].isnull().values.any():
+                logger.warning(f"股票 {stock_code} 最新技术面数据存在缺失值")
+                # 尝试使用倒数第二条数据
+                if len(df) >= 2 and not df.iloc[-2:].isnull().values.any():
+                    latest = df.iloc[-2]
+                else:
+                    return 50.0  # 返回默认评分
+            else:
+                latest = df.iloc[-1]
             
             # 评分指标
             scores = []
             
             # 1. 价格位于均线之上评分
-            if latest['收盘'] > latest['MA5']:
+            if not pd.isna(latest['MA5']) and latest['收盘'] > latest['MA5']:
                 scores.append(70)
             else:
                 scores.append(30)
                 
-            if latest['收盘'] > latest['MA10']:
+            if not pd.isna(latest['MA10']) and latest['收盘'] > latest['MA10']:
                 scores.append(65)
             else:
                 scores.append(35)
                 
-            if latest['收盘'] > latest['MA20']:
+            if not pd.isna(latest['MA20']) and latest['收盘'] > latest['MA20']:
                 scores.append(60)
             else:
                 scores.append(40)
             
             # 2. 均线多头排列评分
-            if latest['MA5'] > latest['MA10'] > latest['MA20']:
+            if not pd.isna(latest['MA5']) and not pd.isna(latest['MA10']) and not pd.isna(latest['MA20']) and latest['MA5'] > latest['MA10'] > latest['MA20']:
                 scores.append(80)
-            elif latest['MA5'] > latest['MA10']:
+            elif not pd.isna(latest['MA5']) and not pd.isna(latest['MA10']) and latest['MA5'] > latest['MA10']:
                 scores.append(60)
             else:
                 scores.append(40)
             
             # 3. 成交量变化评分
-            if latest['成交量变化'] > 0.1:
+            if not pd.isna(latest['成交量变化']) and latest['成交量变化'] > 0.1:
                 scores.append(70)
-            elif latest['成交量变化'] > 0:
+            elif not pd.isna(latest['成交量变化']) and latest['成交量变化'] > 0:
                 scores.append(60)
             else:
                 scores.append(40)
             
             # 4. RSI评分
-            if 40 <= latest['RSI'] <= 60:
-                scores.append(50)
-            elif 30 <= latest['RSI'] < 40 or 60 < latest['RSI'] <= 70:
-                scores.append(60)
-            elif latest['RSI'] < 30:
-                scores.append(70)  # 超卖
+            if not pd.isna(latest['RSI']):
+                if 40 <= latest['RSI'] <= 60:
+                    scores.append(50)
+                elif 30 <= latest['RSI'] < 40 or 60 < latest['RSI'] <= 70:
+                    scores.append(60)
+                elif latest['RSI'] < 30:
+                    scores.append(70)  # 超卖
+                else:
+                    scores.append(30)  # 超买
             else:
-                scores.append(30)  # 超买
+                scores.append(50)  # RSI缺失时使用默认评分
             
             # 计算综合评分
-            technical_score = sum(scores) / len(scores)
+            if scores:
+                technical_score = sum(scores) / len(scores)
+            else:
+                technical_score = 50.0
             
             return technical_score
         
@@ -295,22 +456,70 @@ class AnalyzerManager:
         logger.info("分析行业热度数据")
         
         try:
-            # 确保必要的列存在
-            if '板块名称' not in industry_data.columns or '涨跌幅' not in industry_data.columns:
-                logger.error("行业数据缺少必要的列")
+            # 检查数据是否为空
+            if industry_data.empty or stock_industry_mapping.empty:
+                logger.warning("行业数据或股票行业对应关系为空")
                 return pd.DataFrame(columns=['代码', 'industry_score'])
-                
-            if '代码' not in stock_industry_mapping.columns or '所属行业' not in stock_industry_mapping.columns:
-                logger.error("股票行业对应关系数据缺少必要的列")
+            
+            # 打印行业数据的列名，帮助调试
+            logger.info(f"行业数据列名: {industry_data.columns.tolist()}")
+            logger.info(f"股票行业对应关系列名: {stock_industry_mapping.columns.tolist()}")
+            
+            # 确定行业名称列
+            industry_name_col = None
+            for col in ['板块名称', '板块', '行业名称', '名称', 'name', 'sector_name']:
+                if col in industry_data.columns:
+                    industry_name_col = col
+                    break
+            
+            # 确定涨跌幅列
+            change_col = None
+            for col in ['涨跌幅', '涨跌幅(%)', '涨跌幅度', 'change_pct', 'change']:
+                if col in industry_data.columns:
+                    change_col = col
+                    break
+            
+            # 如果找不到必要的列，返回默认评分
+            if not industry_name_col or not change_col:
+                logger.error(f"行业数据缺少必要的列，可用列: {industry_data.columns.tolist()}")
+                # 尝试使用可能的替代列
+                if '板块' in industry_data.columns:
+                    industry_name_col = '板块'
+                    logger.info(f"使用'板块'列作为行业名称列")
+                else:
+                    return pd.DataFrame(columns=['代码', 'industry_score'])
+            
+            # 确定股票行业对应关系中的列
+            stock_code_col = None
+            for col in ['代码', 'code', 'symbol']:
+                if col in stock_industry_mapping.columns:
+                    stock_code_col = col
+                    break
+            
+            industry_col = None
+            for col in ['所属行业', '行业', 'industry', 'sector']:
+                if col in stock_industry_mapping.columns:
+                    industry_col = col
+                    break
+            
+            # 如果找不到必要的列，返回默认评分
+            if not stock_code_col or not industry_col:
+                logger.error(f"股票行业对应关系数据缺少必要的列，可用列: {stock_industry_mapping.columns.tolist()}")
                 return pd.DataFrame(columns=['代码', 'industry_score'])
             
             # 计算行业评分
             industry_scores = {}
             
+            # 确保涨跌幅是数值类型
+            industry_data[change_col] = pd.to_numeric(industry_data[change_col], errors='coerce')
+            
             # 基于行业涨跌幅计算行业评分
             for _, row in industry_data.iterrows():
-                industry_name = row['板块名称']
-                change_pct = row['涨跌幅']
+                industry_name = row[industry_name_col]
+                change_pct = row[change_col]
+                
+                if pd.isna(change_pct):
+                    continue
                 
                 # 将涨跌幅映射到0-100的评分区间
                 # 假设涨跌幅在-10%到10%之间
@@ -322,21 +531,47 @@ class AnalyzerManager:
             # 为每个股票分配行业评分
             result = []
             for _, row in stock_industry_mapping.iterrows():
-                stock_code = row['代码']
-                industry = row['所属行业']
+                stock_code = row[stock_code_col]
+                industry = row[industry_col]
                 
                 # 获取行业评分，如果行业不在评分字典中，则给予默认评分50
-                industry_score = industry_scores.get(industry, 50)
+                # 尝试精确匹配
+                industry_score = industry_scores.get(industry, None)
+                
+                # 如果精确匹配失败，尝试模糊匹配
+                if industry_score is None:
+                    # 查找包含该行业名称的键
+                    for key, value in industry_scores.items():
+                        if industry in key or key in industry:
+                            industry_score = value
+                            break
+                
+                # 如果仍然没有找到匹配，使用默认评分
+                if industry_score is None:
+                    industry_score = 50
                 
                 result.append({
-                    '代码': stock_code,
+                    '代码': str(stock_code),  # 确保代码是字符串类型
                     'industry_score': industry_score
                 })
             
-            return pd.DataFrame(result)
+            # 转换为DataFrame
+            result_df = pd.DataFrame(result)
+            
+            # 如果结果为空，返回空DataFrame
+            if result_df.empty:
+                logger.warning("行业分析结果为空")
+                return pd.DataFrame(columns=['代码', 'industry_score'])
+            
+            # 对于同一股票可能有多个行业的情况，取平均值
+            result_df = result_df.groupby('代码')['industry_score'].mean().reset_index()
+            
+            return result_df
         
         except Exception as e:
             logger.error(f"分析行业热度数据失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return pd.DataFrame(columns=['代码', 'industry_score'])
     
     def calculate_potential_score(self, stock_data):
@@ -420,4 +655,6 @@ class AnalyzerManager:
             else:
                 reasons.append("综合评分一般，建议观望")
         
-        return "，".join(reasons) + "。" 
+        return "，".join(reasons) + "。"
+
+    
