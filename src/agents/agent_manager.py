@@ -133,19 +133,54 @@ class AgentManager:
         
         try:
             # 获取股票列表
+            all_stocks = None
             if stock_list is None:
                 all_stocks = self.data_manager.get_stock_list()
-                # 检查列名，确保使用正确的列名
-                code_column = '代码' if '代码' in all_stocks.columns else 'code'
-                stock_list = all_stocks[code_column].tolist()
+                # 确保代码列是字符串类型
+                if not all_stocks.empty:
+                    all_stocks = all_stocks.copy()
+                    # 检查列名，确保使用正确的列名
+                    code_column = '代码' if '代码' in all_stocks.columns else 'code'
+                    if code_column in all_stocks.columns:
+                        all_stocks[code_column] = all_stocks[code_column].astype(str)
+                        stock_list = all_stocks[code_column].tolist()
+                    else:
+                        logger.warning(f"股票列表中没有代码列 (既没有 '代码' 也没有 'code')")
+                        stock_list = []
             
             # 收集各类数据
+            fund_flow_data = self.data_manager.get_fund_flow_data()
+            if not fund_flow_data.empty:
+                fund_flow_data = fund_flow_data.copy()
+                # 检查列名
+                code_column = '代码' if '代码' in fund_flow_data.columns else 'code'
+                if code_column in fund_flow_data.columns:
+                    fund_flow_data[code_column] = fund_flow_data[code_column].astype(str)
+                
+            social_data = self.data_manager.get_social_discussion_data()
+            if not social_data.empty:
+                social_data = social_data.copy()
+                # 检查列名
+                code_column = '代码' if '代码' in social_data.columns else 'code'
+                if code_column in social_data.columns:
+                    social_data[code_column] = social_data[code_column].astype(str)
+                
+            industry_data = self.data_manager.get_industry_data()
+            
+            stock_industry_mapping = self.data_manager.get_stock_industry_mapping()
+            if not stock_industry_mapping.empty:
+                stock_industry_mapping = stock_industry_mapping.copy()
+                # 检查列名
+                code_column = '代码' if '代码' in stock_industry_mapping.columns else 'code'
+                if code_column in stock_industry_mapping.columns:
+                    stock_industry_mapping[code_column] = stock_industry_mapping[code_column].astype(str)
+            
             collected_data = {
-                'stock_list': self.data_manager.get_stock_list(),
-                'fund_flow_data': self.data_manager.get_fund_flow_data(),
-                'social_data': self.data_manager.get_social_discussion_data(),
-                'industry_data': self.data_manager.get_industry_data(),
-                'stock_industry_mapping': self.data_manager.get_stock_industry_mapping()
+                'stock_list': all_stocks,
+                'fund_flow_data': fund_flow_data,
+                'social_data': social_data,
+                'industry_data': industry_data,
+                'stock_industry_mapping': stock_industry_mapping
             }
             
             logger.info("数据收集完成")
@@ -153,6 +188,8 @@ class AgentManager:
             
         except Exception as e:
             logger.error(f"数据收集Agent工作失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             raise
     
     def _init_analysis_agent(self):
@@ -398,38 +435,30 @@ class AgentManager:
             logger.warning(f"增强推荐理由失败: {e}")
             return stock_data['reason']  # 返回原始推荐理由
     
-    def run_analysis_pipeline(self, top_n=10, min_score=60, max_stocks_to_process=10):
-        """运行完整的分析流程
+    def get_candidate_stocks(self, data, fund_flow_scores, social_scores, max_stocks_to_process=10):
+        """获取候选股票列表
         
         Args:
-            top_n: 推荐的股票数量
-            min_score: 最低推荐评分
-            max_stocks_to_process: 最大处理的股票数量，避免API调用过多，默认10只
+            data: 收集的数据字典
+            fund_flow_scores: 资金流向评分DataFrame
+            social_scores: 社交热度评分DataFrame
+            max_stocks_to_process: 最大处理的股票数量
             
         Returns:
-            list: 包含推荐股票信息的列表
+            list: 候选股票列表，每个元素是包含代码和名称的字典
         """
         try:
-            # 收集数据
-            data = self.collect_data()
-            
-            # 先分析资金流向和社交热度数据，这两个不需要逐只股票API调用
-            logger.info("分析资金流向数据...")
-            fund_flow_scores = self.analyzer_manager.analyze_fund_flow(data.get('fund_flow_data', pd.DataFrame()))
-            
-            # 确保代码列是字符串类型
-            if not fund_flow_scores.empty and '代码' in fund_flow_scores.columns:
-                fund_flow_scores['代码'] = fund_flow_scores['代码'].astype(str)
-            
-            logger.info("分析社交热度数据...")
-            social_scores = self.analyzer_manager.analyze_social_discussion(data.get('social_data', pd.DataFrame()))
-            
-            # 确保代码列是字符串类型
-            if not social_scores.empty and '代码' in social_scores.columns:
-                social_scores['代码'] = social_scores['代码'].astype(str)
-            
             # 合并初步评分，筛选出有热度的股票
             initial_scores = pd.DataFrame()
+            
+            # 确保代码列都是字符串类型
+            if not fund_flow_scores.empty and '代码' in fund_flow_scores.columns:
+                fund_flow_scores = fund_flow_scores.copy()
+                fund_flow_scores['代码'] = fund_flow_scores['代码'].astype(str)
+            
+            if not social_scores.empty and '代码' in social_scores.columns:
+                social_scores = social_scores.copy()
+                social_scores['代码'] = social_scores['代码'].astype(str)
             
             if not fund_flow_scores.empty:
                 if initial_scores.empty:
@@ -441,6 +470,8 @@ class AgentManager:
                 if initial_scores.empty:
                     initial_scores = social_scores.copy()
                 else:
+                    # 确保代码列是字符串类型
+                    initial_scores['代码'] = initial_scores['代码'].astype(str)
                     initial_scores = pd.merge(initial_scores, social_scores, on='代码', how='outer')
             
             # 计算初步评分（资金流向和社交热度的加权平均值）
@@ -474,10 +505,17 @@ class AgentManager:
             else:
                 logger.warning("初步评分为空，将分析所有股票")
                 stock_list = data.get('stock_list')
-                if stock_list is not None and not stock_list.empty and '代码' in stock_list.columns:
-                    # 确保代码列是字符串类型
-                    stock_list['代码'] = stock_list['代码'].astype(str)
-                    candidate_stock_codes = stock_list['代码'].tolist()
+                if stock_list is not None and not stock_list.empty:
+                    # 检查列名，确保使用正确的列名
+                    code_column = '代码' if '代码' in stock_list.columns else 'code'
+                    if code_column in stock_list.columns:
+                        # 确保代码列是字符串类型
+                        stock_list = stock_list.copy()
+                        stock_list[code_column] = stock_list[code_column].astype(str)
+                        candidate_stock_codes = stock_list[code_column].tolist()
+                    else:
+                        logger.error(f"股票列表中没有代码列 (既没有 '代码' 也没有 'code')")
+                        return []
                 else:
                     logger.error("无法获取股票列表")
                     return []
@@ -491,6 +529,103 @@ class AgentManager:
                 logger.info(f"限制处理的股票数量为 {max_stocks_to_process} 只，避免API调用频率限制导致分析时间过长")
                 candidate_stock_codes = candidate_stock_codes[:max_stocks_to_process]
             
+            # 获取股票名称
+            stock_list = data.get('stock_list')
+            result = []
+            
+            if stock_list is not None and not stock_list.empty:
+                # 检查列名，确保使用正确的列名
+                code_column = '代码' if '代码' in stock_list.columns else 'code'
+                name_column = '名称' if '名称' in stock_list.columns else 'name'
+                
+                if code_column in stock_list.columns:
+                    # 确保代码列是字符串类型
+                    stock_list = stock_list.copy()
+                    stock_list[code_column] = stock_list[code_column].astype(str)
+                    
+                    # 为每个候选股票代码获取名称
+                    for code in candidate_stock_codes:
+                        stock_info = stock_list[stock_list[code_column] == code]
+                        name = stock_info[name_column].values[0] if not stock_info.empty and name_column in stock_info.columns else "未知"
+                        result.append({
+                            'code': code,
+                            'name': name
+                        })
+                else:
+                    # 如果没有代码列，只返回代码
+                    logger.warning(f"股票列表中没有代码列 (既没有 '{code_column}' 也没有 'code')")
+                    result = [{'code': code, 'name': "未知"} for code in candidate_stock_codes]
+            else:
+                # 如果没有股票列表，只返回代码
+                result = [{'code': code, 'name': "未知"} for code in candidate_stock_codes]
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"获取候选股票列表失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
+    
+    def run_analysis_pipeline(self, top_n=10, min_score=60, max_stocks_to_process=10, candidate_stocks=None):
+        """运行完整的分析流程
+        
+        Args:
+            top_n: 推荐的股票数量
+            min_score: 最低推荐评分
+            max_stocks_to_process: 最大处理的股票数量，避免API调用过多，默认10只
+            candidate_stocks: 预先筛选的候选股票列表，如果为None则重新筛选
+            
+        Returns:
+            list: 包含推荐股票信息的列表
+        """
+        try:
+            # 收集数据
+            data = self.collect_data()
+            
+            # 如果没有提供候选股票列表，则筛选候选股票
+            if candidate_stocks is None:
+                # 先分析资金流向和社交热度数据，这两个不需要逐只股票API调用
+                logger.info("分析资金流向数据...")
+                fund_flow_scores = self.analyzer_manager.analyze_fund_flow(data.get('fund_flow_data', pd.DataFrame()))
+                
+                # 确保代码列是字符串类型
+                if not fund_flow_scores.empty and '代码' in fund_flow_scores.columns:
+                    fund_flow_scores = fund_flow_scores.copy()
+                    fund_flow_scores['代码'] = fund_flow_scores['代码'].astype(str)
+                
+                logger.info("分析社交热度数据...")
+                social_scores = self.analyzer_manager.analyze_social_discussion(data.get('social_data', pd.DataFrame()))
+                
+                # 确保代码列是字符串类型
+                if not social_scores.empty and '代码' in social_scores.columns:
+                    social_scores = social_scores.copy()
+                    social_scores['代码'] = social_scores['代码'].astype(str)
+                
+                # 获取候选股票列表
+                candidate_stocks_info = self.get_candidate_stocks(data, fund_flow_scores, social_scores, max_stocks_to_process)
+                candidate_stock_codes = [stock['code'] for stock in candidate_stocks_info]
+            else:
+                # 使用提供的候选股票列表
+                candidate_stock_codes = [stock['code'] for stock in candidate_stocks]
+                
+                # 先分析资金流向和社交热度数据，这两个不需要逐只股票API调用
+                logger.info("分析资金流向数据...")
+                fund_flow_scores = self.analyzer_manager.analyze_fund_flow(data.get('fund_flow_data', pd.DataFrame()))
+                
+                # 确保代码列是字符串类型
+                if not fund_flow_scores.empty and '代码' in fund_flow_scores.columns:
+                    fund_flow_scores = fund_flow_scores.copy()
+                    fund_flow_scores['代码'] = fund_flow_scores['代码'].astype(str)
+                
+                logger.info("分析社交热度数据...")
+                social_scores = self.analyzer_manager.analyze_social_discussion(data.get('social_data', pd.DataFrame()))
+                
+                # 确保代码列是字符串类型
+                if not social_scores.empty and '代码' in social_scores.columns:
+                    social_scores = social_scores.copy()
+                    social_scores['代码'] = social_scores['代码'].astype(str)
+            
             # 只对候选股票进行详细分析
             logger.info("开始对候选股票进行详细分析...")
             results = []
@@ -500,15 +635,23 @@ class AgentManager:
             fundamental_data = self.data_manager.get_stock_fundamental_data(candidate_stock_codes)
             
             # 确保代码列是字符串类型
-            if not fundamental_data.empty and '代码' in fundamental_data.columns:
-                fundamental_data['代码'] = fundamental_data['代码'].astype(str)
+            if not fundamental_data.empty:
+                fundamental_data = fundamental_data.copy()
+                # 检查列名
+                code_column = '代码' if '代码' in fundamental_data.columns else 'code'
+                if code_column in fundamental_data.columns:
+                    fundamental_data[code_column] = fundamental_data[code_column].astype(str)
             
             logger.info("分析基本面数据...")
             fundamental_scores = self.analyzer_manager.analyze_fundamental(fundamental_data)
             
             # 确保代码列是字符串类型
-            if not fundamental_scores.empty and '代码' in fundamental_scores.columns:
-                fundamental_scores['代码'] = fundamental_scores['代码'].astype(str)
+            if not fundamental_scores.empty:
+                fundamental_scores = fundamental_scores.copy()
+                # 检查列名
+                code_column = '代码' if '代码' in fundamental_scores.columns else 'code'
+                if code_column in fundamental_scores.columns:
+                    fundamental_scores[code_column] = fundamental_scores[code_column].astype(str)
             
             # 获取行业数据
             logger.info("获取行业数据...")
@@ -516,15 +659,23 @@ class AgentManager:
             stock_industry_mapping = data.get('stock_industry_mapping', pd.DataFrame())
             
             # 确保代码列是字符串类型
-            if not stock_industry_mapping.empty and '代码' in stock_industry_mapping.columns:
-                stock_industry_mapping['代码'] = stock_industry_mapping['代码'].astype(str)
+            if not stock_industry_mapping.empty:
+                stock_industry_mapping = stock_industry_mapping.copy()
+                # 检查列名
+                code_column = '代码' if '代码' in stock_industry_mapping.columns else 'code'
+                if code_column in stock_industry_mapping.columns:
+                    stock_industry_mapping[code_column] = stock_industry_mapping[code_column].astype(str)
             
             logger.info("分析行业数据...")
             industry_scores = self.analyzer_manager.analyze_industry(industry_data, stock_industry_mapping)
             
             # 确保代码列是字符串类型
-            if not industry_scores.empty and '代码' in industry_scores.columns:
-                industry_scores['代码'] = industry_scores['代码'].astype(str)
+            if not industry_scores.empty:
+                industry_scores = industry_scores.copy()
+                # 检查列名
+                code_column = '代码' if '代码' in industry_scores.columns else 'code'
+                if code_column in industry_scores.columns:
+                    industry_scores[code_column] = industry_scores[code_column].astype(str)
             
             # 逐只分析候选股票的技术面
             total_stocks = len(candidate_stock_codes)
@@ -540,7 +691,7 @@ class AgentManager:
                     
                     # 如果设置了进度回调函数，调用它
                     if self.progress_callback:
-                        self.progress_callback(i+1, total_stocks, stock_code)
+                        self.progress_callback(i+1, total_stocks, stock_code, "分析中")
                     
                     # 确保股票代码是字符串类型
                     stock_code = str(stock_code)
@@ -553,34 +704,62 @@ class AgentManager:
                     stock_scores = {}
                     
                     # 添加资金流向评分
-                    if not fund_flow_scores.empty and stock_code in fund_flow_scores['代码'].values:
-                        stock_fund_flow = fund_flow_scores[fund_flow_scores['代码'] == stock_code]
-                        if not stock_fund_flow.empty:
-                            stock_scores['fund_flow_score'] = float(stock_fund_flow['fund_flow_score'].values[0])
+                    if not fund_flow_scores.empty:
+                        # 检查列名
+                        code_column = '代码' if '代码' in fund_flow_scores.columns else 'code'
+                        if code_column in fund_flow_scores.columns and stock_code in fund_flow_scores[code_column].values:
+                            stock_fund_flow = fund_flow_scores[fund_flow_scores[code_column] == stock_code]
+                            if not stock_fund_flow.empty and 'fund_flow_score' in stock_fund_flow.columns:
+                                stock_scores['fund_flow_score'] = float(stock_fund_flow['fund_flow_score'].values[0])
+                            else:
+                                stock_scores['fund_flow_score'] = 50
+                        else:
+                            stock_scores['fund_flow_score'] = 50
                     else:
                         stock_scores['fund_flow_score'] = 50
                     
                     # 添加社交热度评分
-                    if not social_scores.empty and stock_code in social_scores['代码'].values:
-                        stock_social = social_scores[social_scores['代码'] == stock_code]
-                        if not stock_social.empty:
-                            stock_scores['social_score'] = float(stock_social['social_score'].values[0])
+                    if not social_scores.empty:
+                        # 检查列名
+                        code_column = '代码' if '代码' in social_scores.columns else 'code'
+                        if code_column in social_scores.columns and stock_code in social_scores[code_column].values:
+                            stock_social = social_scores[social_scores[code_column] == stock_code]
+                            if not stock_social.empty and 'social_score' in stock_social.columns:
+                                stock_scores['social_score'] = float(stock_social['social_score'].values[0])
+                            else:
+                                stock_scores['social_score'] = 50
+                        else:
+                            stock_scores['social_score'] = 50
                     else:
                         stock_scores['social_score'] = 50
                     
                     # 添加基本面评分
-                    if not fundamental_scores.empty and stock_code in fundamental_scores['代码'].values:
-                        stock_fundamental = fundamental_scores[fundamental_scores['代码'] == stock_code]
-                        if not stock_fundamental.empty:
-                            stock_scores['fundamental_score'] = float(stock_fundamental['fundamental_score'].values[0])
+                    if not fundamental_scores.empty:
+                        # 检查列名
+                        code_column = '代码' if '代码' in fundamental_scores.columns else 'code'
+                        if code_column in fundamental_scores.columns and stock_code in fundamental_scores[code_column].values:
+                            stock_fundamental = fundamental_scores[fundamental_scores[code_column] == stock_code]
+                            if not stock_fundamental.empty and 'fundamental_score' in stock_fundamental.columns:
+                                stock_scores['fundamental_score'] = float(stock_fundamental['fundamental_score'].values[0])
+                            else:
+                                stock_scores['fundamental_score'] = 50
+                        else:
+                            stock_scores['fundamental_score'] = 50
                     else:
                         stock_scores['fundamental_score'] = 50
                     
                     # 添加行业评分
-                    if not industry_scores.empty and stock_code in industry_scores['代码'].values:
-                        stock_industry = industry_scores[industry_scores['代码'] == stock_code]
-                        if not stock_industry.empty:
-                            stock_scores['industry_score'] = float(stock_industry['industry_score'].values[0])
+                    if not industry_scores.empty:
+                        # 检查列名
+                        code_column = '代码' if '代码' in industry_scores.columns else 'code'
+                        if code_column in industry_scores.columns and stock_code in industry_scores[code_column].values:
+                            stock_industry = industry_scores[industry_scores[code_column] == stock_code]
+                            if not stock_industry.empty and 'industry_score' in stock_industry.columns:
+                                stock_scores['industry_score'] = float(stock_industry['industry_score'].values[0])
+                            else:
+                                stock_scores['industry_score'] = 50
+                        else:
+                            stock_scores['industry_score'] = 50
                     else:
                         stock_scores['industry_score'] = 50
                     
@@ -590,11 +769,16 @@ class AgentManager:
                     # 获取股票名称
                     stock_name = ""
                     if 'stock_list' in data and not data['stock_list'].empty:
-                        # 确保代码列是字符串类型
-                        data['stock_list']['代码'] = data['stock_list']['代码'].astype(str)
-                        stock_info = data['stock_list'][data['stock_list']['代码'] == stock_code]
-                        if not stock_info.empty and '名称' in stock_info.columns:
-                            stock_name = stock_info['名称'].values[0]
+                        stock_list = data['stock_list'].copy()
+                        # 检查列名
+                        code_column = '代码' if '代码' in stock_list.columns else 'code'
+                        name_column = '名称' if '名称' in stock_list.columns else 'name'
+                        
+                        if code_column in stock_list.columns:
+                            stock_list[code_column] = stock_list[code_column].astype(str)
+                            stock_info = stock_list[stock_list[code_column] == stock_code]
+                            if not stock_info.empty and name_column in stock_info.columns:
+                                stock_name = stock_info[name_column].values[0]
                     
                     # 计算综合评分（使用分析器管理器的权重）
                     potential_score = self.analyzer_manager.calculate_potential_score(stock_scores)
@@ -613,9 +797,17 @@ class AgentManager:
                     
                     success_count += 1
                     
+                    # 如果设置了进度回调函数，更新状态为完成
+                    if self.progress_callback:
+                        self.progress_callback(i+1, total_stocks, stock_code, "分析完成")
+                    
                 except Exception as e:
                     logger.warning(f"分析股票 {stock_code} 时出错: {e}")
                     error_count += 1
+                    
+                    # 如果设置了进度回调函数，更新状态为失败
+                    if self.progress_callback:
+                        self.progress_callback(i+1, total_stocks, stock_code, "分析失败")
             
             logger.info(f"股票分析完成，共 {total_stocks} 只，成功 {success_count} 只，失败 {error_count} 只")
             

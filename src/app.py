@@ -79,9 +79,6 @@ def run_analysis():
         social_scores = analyzer_manager.analyze_social_discussion(data.get('social_data', pd.DataFrame()))
         progress_bar.progress(60)
         
-        # 运行完整分析流程
-        status_text.text("正在进行综合分析...")
-        
         # 获取分析参数
         top_n = st.session_state.get('stock_count', 5)
         min_score = st.session_state.get('min_score', 60)
@@ -91,23 +88,61 @@ def run_analysis():
         tech_analysis_status = st.empty()
         api_limit_notice = st.info("注意：由于API调用频率限制，每次获取股票数据需要等待约30秒，分析过程可能需要较长时间，请耐心等待。")
         
+        # 获取候选股票列表
+        status_text.text("正在筛选候选股票...")
+        candidate_stocks = agent_manager.get_candidate_stocks(data, fund_flow_scores, social_scores, max_stocks)
+        
+        if not candidate_stocks:
+            st.error("无法获取候选股票列表")
+            return []
+        
+        # 显示候选股票列表和状态
+        st.subheader("候选股票分析状态")
+        
+        # 创建一个DataFrame来存储候选股票信息
+        candidate_df = pd.DataFrame({
+            '代码': [stock['code'] for stock in candidate_stocks],
+            '名称': [stock['name'] for stock in candidate_stocks],
+            '状态': ['等待分析'] * len(candidate_stocks)
+        })
+        
+        # 创建一个占位符来显示候选股票状态表格
+        candidate_table = st.empty()
+        candidate_table.dataframe(candidate_df)
+        
         # 使用自定义的进度回调函数
-        def progress_callback(current, total, stock_code=""):
+        def progress_callback(current, total, stock_code="", status="分析中"):
             progress_value = 60 + (current / total) * 30
             progress_bar.progress(int(progress_value))
             tech_analysis_status.text(f"正在分析技术面数据 ({current}/{total}): {stock_code} - 由于API限制，每次请求间隔约30秒")
+            
+            # 更新候选股票状态
+            if stock_code:
+                idx = candidate_df[candidate_df['代码'] == stock_code].index
+                if len(idx) > 0:
+                    candidate_df.loc[idx[0], '状态'] = status
+                    candidate_table.dataframe(candidate_df)
         
         # 将回调函数传递给agent_manager
         agent_manager.set_progress_callback(progress_callback)
         
         # 运行分析流程
-        results = agent_manager.run_analysis_pipeline(top_n=top_n, min_score=min_score, max_stocks_to_process=max_stocks)
+        results = agent_manager.run_analysis_pipeline(top_n=top_n, min_score=min_score, max_stocks_to_process=max_stocks, candidate_stocks=candidate_stocks)
+        
+        # 更新所有已完成股票的状态
+        completed_codes = [result['code'] for result in results]
+        for i, row in candidate_df.iterrows():
+            if row['代码'] in completed_codes:
+                candidate_df.loc[i, '状态'] = '分析完成'
+            elif row['状态'] == '等待分析' or row['状态'] == '分析中':
+                candidate_df.loc[i, '状态'] = '分析失败或跳过'
+        
+        candidate_table.dataframe(candidate_df)
         
         # 完成进度
         progress_bar.progress(100)
         status_text.text("分析完成！")
         tech_analysis_status.empty()
-        api_limit_notice.empty()
         
         return results
         
