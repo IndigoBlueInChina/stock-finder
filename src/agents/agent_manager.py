@@ -9,7 +9,7 @@ import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Callable, Optional
 import json
 from pathlib import Path
 import time
@@ -56,6 +56,17 @@ class AgentManager:
         # 结果缓存
         self.results_cache = Path("data/results_cache")
         self.results_cache.mkdir(exist_ok=True, parents=True)
+        
+        # 进度回调函数
+        self.progress_callback = None
+    
+    def set_progress_callback(self, callback: Callable[[int, int, str], None]):
+        """设置进度回调函数
+        
+        Args:
+            callback: 回调函数，接收当前进度、总进度和当前处理的股票代码
+        """
+        self.progress_callback = callback
     
     def _init_llm(self):
         """初始化大语言模型
@@ -387,13 +398,13 @@ class AgentManager:
             logger.warning(f"增强推荐理由失败: {e}")
             return stock_data['reason']  # 返回原始推荐理由
     
-    def run_analysis_pipeline(self, top_n=10, min_score=60, max_stocks_to_process=20):
+    def run_analysis_pipeline(self, top_n=10, min_score=60, max_stocks_to_process=10):
         """运行完整的分析流程
         
         Args:
             top_n: 推荐的股票数量
             min_score: 最低推荐评分
-            max_stocks_to_process: 最大处理的股票数量，避免API调用过多
+            max_stocks_to_process: 最大处理的股票数量，避免API调用过多，默认10只
             
         Returns:
             list: 包含推荐股票信息的列表
@@ -455,8 +466,8 @@ class AgentManager:
                     initial_scores['social_score'] * social_weight
                 ) / total_weight
                 
-                # 筛选出初步评分较高的股票（例如前100名）作为候选
-                candidate_stocks = initial_scores.sort_values('initial_score', ascending=False).head(100)
+                # 筛选出初步评分较高的股票（例如前50名）作为候选
+                candidate_stocks = initial_scores.sort_values('initial_score', ascending=False).head(50)
                 candidate_stock_codes = candidate_stocks['代码'].tolist()
                 
                 logger.info(f"初步筛选出 {len(candidate_stock_codes)} 只有热度的股票进行深入分析")
@@ -471,13 +482,13 @@ class AgentManager:
                     logger.error("无法获取股票列表")
                     return []
                 
-                if len(candidate_stock_codes) > 100:
-                    logger.warning(f"股票数量过多 ({len(candidate_stock_codes)})，将限制为前100只")
-                    candidate_stock_codes = candidate_stock_codes[:100]
+                if len(candidate_stock_codes) > 50:
+                    logger.warning(f"股票数量过多 ({len(candidate_stock_codes)})，将限制为前50只")
+                    candidate_stock_codes = candidate_stock_codes[:50]
             
             # 限制处理的股票数量，避免API调用过多
             if len(candidate_stock_codes) > max_stocks_to_process:
-                logger.info(f"限制处理的股票数量为 {max_stocks_to_process} 只")
+                logger.info(f"限制处理的股票数量为 {max_stocks_to_process} 只，避免API调用频率限制导致分析时间过长")
                 candidate_stock_codes = candidate_stock_codes[:max_stocks_to_process]
             
             # 只对候选股票进行详细分析
@@ -526,6 +537,10 @@ class AgentManager:
                 try:
                     # 记录进度
                     logger.info(f"正在分析第 {i+1}/{total_stocks} 只股票: {stock_code} (成功: {success_count}, 失败: {error_count})")
+                    
+                    # 如果设置了进度回调函数，调用它
+                    if self.progress_callback:
+                        self.progress_callback(i+1, total_stocks, stock_code)
                     
                     # 确保股票代码是字符串类型
                     stock_code = str(stock_code)

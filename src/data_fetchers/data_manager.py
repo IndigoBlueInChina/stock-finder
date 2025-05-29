@@ -607,14 +607,14 @@ class DataManager:
             else:
                 return pd.DataFrame(columns=['代码', 'PE', 'PB'])
     
-    def get_stock_technical_data(self, stock_code, days=60, max_retries=3, base_delay=5):
+    def get_stock_technical_data(self, stock_code, days=60, max_retries=3, base_delay=30):
         """获取股票技术面数据
         
         Args:
             stock_code: 股票代码
             days: 获取最近几天的数据，默认60天
             max_retries: 最大重试次数
-            base_delay: 基础延迟时间(秒)
+            base_delay: 基础延迟时间(秒)，默认30秒，避免API调用频率限制
             
         Returns:
             pandas.DataFrame: 包含股票价格、成交量等信息的DataFrame
@@ -658,77 +658,140 @@ class DataManager:
                 # 获取股票日线数据
                 logger.info(f"获取股票 {clean_code} 技术面数据 (尝试 {retries + 1}/{max_retries})")
                 
-                # 添加随机延时，避免请求过于频繁
+                # 添加强制等待时间，避免API调用频率限制
                 if retries > 0:
                     # 指数退避策略：每次重试增加等待时间
-                    delay = base_delay * (2 ** retries) + random.uniform(1, 3)
+                    delay = base_delay * (1 + retries) + random.uniform(1, 5)
                     logger.info(f"等待 {delay:.2f} 秒后重试...")
-                    time.sleep(delay)
+                else:
+                    # 首次调用也需要等待，避免频率限制
+                    delay = base_delay + random.uniform(1, 5)
+                    logger.info(f"API调用需要等待 {delay:.2f} 秒，避免频率限制...")
                 
-                # 尝试不同的方法获取数据
-                stock_data = None
+                # 强制等待
+                time.sleep(delay)
                 
+                # 尝试使用stock_zh_a_hist获取数据
+                logger.info(f"使用stock_zh_a_hist获取股票 {clean_code} 数据")
                 try:
-                    # 首先尝试使用stock_zh_a_hist
-                    logger.info(f"尝试使用stock_zh_a_hist获取股票 {clean_code} 数据")
                     stock_data = ak.stock_zh_a_hist(
                         symbol=clean_code,
                         period="daily",
                         start_date=start_date,
                         end_date=end_date,
-                        adjust="qfq"
+                        adjust="qfq",  # 前复权
+                        timeout=60  # 设置更长的超时时间
                     )
-                except Exception as e1:
-                    logger.warning(f"使用stock_zh_a_hist获取股票 {clean_code} 数据失败: {e1}")
                     
+                    # 如果成功获取数据，检查是否为空
+                    if stock_data is None or stock_data.empty:
+                        logger.warning(f"获取到的股票 {clean_code} 数据为空")
+                        raise ValueError("获取的数据为空")
+                    
+                    # 检查并标准化列名
+                    column_mapping = {
+                        '日期': '日期',
+                        '开盘': '开盘',
+                        '收盘': '收盘',
+                        '最高': '最高',
+                        '最低': '最低',
+                        '成交量': '成交量',
+                        'date': '日期',
+                        'open': '开盘',
+                        'close': '收盘',
+                        'high': '最高',
+                        'low': '最低',
+                        'volume': '成交量'
+                    }
+                    
+                    # 重命名列
+                    renamed_columns = {}
+                    for col in stock_data.columns:
+                        if col in column_mapping:
+                            renamed_columns[col] = column_mapping[col]
+                    
+                    if renamed_columns:
+                        stock_data = stock_data.rename(columns=renamed_columns)
+                    
+                    # 确保必要的列都存在
+                    required_columns = ['日期', '开盘', '收盘', '最高', '最低', '成交量']
+                    missing_columns = [col for col in required_columns if col not in stock_data.columns]
+                    
+                    if missing_columns:
+                        logger.warning(f"股票 {clean_code} 数据缺少必要的列: {missing_columns}")
+                        # 尝试其他方法获取数据
+                        raise ValueError(f"数据缺少必要的列: {missing_columns}")
+                    
+                    # 保存到缓存
+                    stock_data.to_csv(cache_file, index=False)
+                    
+                    # 只返回最近days天的数据
+                    return stock_data.iloc[-days:]
+                    
+                except Exception as e:
+                    logger.warning(f"使用stock_zh_a_hist获取股票 {clean_code} 数据失败: {e}")
+                    # 尝试其他方法
                     try:
-                        # 尝试使用stock_zh_a_daily
-                        logger.info(f"尝试使用stock_zh_a_daily获取股票 {clean_code} 数据")
-                        stock_data = ak.stock_zh_a_daily(symbol=clean_code, adjust="qfq")
-                    except Exception as e2:
-                        logger.warning(f"使用stock_zh_a_daily获取股票 {clean_code} 数据失败: {e2}")
+                        # 再次强制等待，避免API调用频率限制
+                        wait_time = base_delay + random.uniform(1, 5)
+                        logger.info(f"API调用需要等待 {wait_time:.2f} 秒，避免频率限制...")
+                        time.sleep(wait_time)
                         
+                        # 尝试不带参数的stock_zh_a_hist
+                        logger.info(f"尝试使用简化参数的stock_zh_a_hist获取股票 {clean_code} 数据")
+                        stock_data = ak.stock_zh_a_hist(symbol=clean_code, adjust="qfq")
+                        
+                        # 检查数据是否为空
+                        if stock_data is None or stock_data.empty:
+                            logger.warning(f"获取到的股票 {clean_code} 数据为空")
+                            raise ValueError("获取的数据为空")
+                        
+                        # 标准化列名
+                        for old_col, new_col in [('日期', '日期'), ('开盘', '开盘'), ('收盘', '收盘'), 
+                                                ('最高', '最高'), ('最低', '最低'), ('成交量', '成交量')]:
+                            if old_col in stock_data.columns and old_col != new_col:
+                                stock_data = stock_data.rename(columns={old_col: new_col})
+                        
+                        # 保存到缓存
+                        stock_data.to_csv(cache_file, index=False)
+                        
+                        # 只返回最近days天的数据
+                        return stock_data.iloc[-days:]
+                        
+                    except Exception as e2:
+                        logger.warning(f"使用简化参数的stock_zh_a_hist获取股票 {clean_code} 数据失败: {e2}")
+                        
+                        # 再次强制等待，避免API调用频率限制
+                        wait_time = base_delay + random.uniform(1, 5)
+                        logger.info(f"API调用需要等待 {wait_time:.2f} 秒，避免频率限制...")
+                        time.sleep(wait_time)
+                        
+                        # 尝试使用stock_zh_a_daily
                         try:
-                            # 尝试使用stock_zh_a_daily_qfq
-                            logger.info(f"尝试使用stock_zh_a_daily_qfq获取股票 {clean_code} 数据")
-                            stock_data = ak.stock_zh_a_daily_qfq(symbol=clean_code)
-                        except Exception as e3:
-                            logger.warning(f"使用stock_zh_a_daily_qfq获取股票 {clean_code} 数据失败: {e3}")
+                            logger.info(f"尝试使用stock_zh_a_daily获取股票 {clean_code} 数据")
+                            stock_data = ak.stock_zh_a_daily(symbol=clean_code, adjust="qfq")
                             
-                            try:
-                                # 尝试使用stock_zh_a_minute
-                                logger.info(f"尝试使用stock_zh_a_minute获取股票 {clean_code} 数据")
-                                stock_data = ak.stock_zh_a_minute(symbol=clean_code, period='daily')
-                            except Exception as e4:
-                                logger.warning(f"使用stock_zh_a_minute获取股票 {clean_code} 数据失败: {e4}")
-                                # 所有方法都失败了
-                                stock_data = None
-                
-                # 检查数据是否为空或None
-                if stock_data is None or stock_data.empty:
-                    logger.warning(f"获取到的股票 {clean_code} 数据为空")
-                    retries += 1
-                    continue
-                
-                # 检查并标准化列名
-                if '日期' not in stock_data.columns and 'date' in stock_data.columns:
-                    stock_data = stock_data.rename(columns={'date': '日期'})
-                if '收盘' not in stock_data.columns and 'close' in stock_data.columns:
-                    stock_data = stock_data.rename(columns={'close': '收盘'})
-                if '开盘' not in stock_data.columns and 'open' in stock_data.columns:
-                    stock_data = stock_data.rename(columns={'open': '开盘'})
-                if '最高' not in stock_data.columns and 'high' in stock_data.columns:
-                    stock_data = stock_data.rename(columns={'high': '最高'})
-                if '最低' not in stock_data.columns and 'low' in stock_data.columns:
-                    stock_data = stock_data.rename(columns={'low': '最低'})
-                if '成交量' not in stock_data.columns and 'volume' in stock_data.columns:
-                    stock_data = stock_data.rename(columns={'volume': '成交量'})
-                
-                # 保存到缓存
-                stock_data.to_csv(cache_file, index=False)
-                
-                # 只返回最近days天的数据
-                return stock_data.iloc[-days:]
+                            # 检查数据是否为空
+                            if stock_data is None or stock_data.empty:
+                                logger.warning(f"获取到的股票 {clean_code} 数据为空")
+                                raise ValueError("获取的数据为空")
+                            
+                            # 标准化列名
+                            for old_col, new_col in [('date', '日期'), ('open', '开盘'), ('close', '收盘'), 
+                                                    ('high', '最高'), ('low', '最低'), ('volume', '成交量')]:
+                                if old_col in stock_data.columns:
+                                    stock_data = stock_data.rename(columns={old_col: new_col})
+                            
+                            # 保存到缓存
+                            stock_data.to_csv(cache_file, index=False)
+                            
+                            # 只返回最近days天的数据
+                            return stock_data.iloc[-days:]
+                            
+                        except Exception as e3:
+                            logger.warning(f"使用stock_zh_a_daily获取股票 {clean_code} 数据失败: {e3}")
+                            retries += 1
+                            continue
                 
             except Exception as e:
                 retries += 1

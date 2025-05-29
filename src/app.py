@@ -44,26 +44,77 @@ st.markdown("基于资金热点和用户讨论热点，寻找具有上升潜力�
 
 def run_analysis():
     """运行分析流程"""
-    with st.spinner("正在分析数据，请稍候..."):
-        try:
-            # 初始化数据管理器
-            data_manager = DataManager()
-            
-            # 初始化分析管理器
-            analyzer_manager = AnalyzerManager()
-            
-            # 初始化Agent管理器
-            agent_manager = AgentManager(data_manager, analyzer_manager)
-            
-            # 运行分析流程
-            results = agent_manager.run_analysis_pipeline()
-            
-            return results
+    try:
+        # 创建进度条
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         
-        except Exception as e:
-            logger.error(f"分析过程出错: {e}")
-            st.error(f"分析过程出错: {str(e)}")
-            return []
+        # 初始化数据管理器
+        status_text.text("正在初始化数据管理器...")
+        data_manager = DataManager()
+        progress_bar.progress(10)
+        
+        # 初始化分析管理器
+        status_text.text("正在初始化分析管理器...")
+        analyzer_manager = AnalyzerManager()
+        progress_bar.progress(20)
+        
+        # 初始化Agent管理器
+        status_text.text("正在初始化Agent管理器...")
+        agent_manager = AgentManager(data_manager, analyzer_manager)
+        progress_bar.progress(30)
+        
+        # 收集数据
+        status_text.text("正在收集市场数据...")
+        data = agent_manager.collect_data()
+        progress_bar.progress(40)
+        
+        # 分析资金流向
+        status_text.text("正在分析资金流向数据...")
+        fund_flow_scores = analyzer_manager.analyze_fund_flow(data.get('fund_flow_data', pd.DataFrame()))
+        progress_bar.progress(50)
+        
+        # 分析社交热度
+        status_text.text("正在分析社交媒体讨论数据...")
+        social_scores = analyzer_manager.analyze_social_discussion(data.get('social_data', pd.DataFrame()))
+        progress_bar.progress(60)
+        
+        # 运行完整分析流程
+        status_text.text("正在进行综合分析...")
+        
+        # 获取分析参数
+        top_n = st.session_state.get('stock_count', 5)
+        min_score = st.session_state.get('min_score', 60)
+        max_stocks = st.session_state.get('max_stocks', 8)
+        
+        # 创建一个占位符用于显示技术面分析进度
+        tech_analysis_status = st.empty()
+        api_limit_notice = st.info("注意：由于API调用频率限制，每次获取股票数据需要等待约30秒，分析过程可能需要较长时间，请耐心等待。")
+        
+        # 使用自定义的进度回调函数
+        def progress_callback(current, total, stock_code=""):
+            progress_value = 60 + (current / total) * 30
+            progress_bar.progress(int(progress_value))
+            tech_analysis_status.text(f"正在分析技术面数据 ({current}/{total}): {stock_code} - 由于API限制，每次请求间隔约30秒")
+        
+        # 将回调函数传递给agent_manager
+        agent_manager.set_progress_callback(progress_callback)
+        
+        # 运行分析流程
+        results = agent_manager.run_analysis_pipeline(top_n=top_n, min_score=min_score, max_stocks_to_process=max_stocks)
+        
+        # 完成进度
+        progress_bar.progress(100)
+        status_text.text("分析完成！")
+        tech_analysis_status.empty()
+        api_limit_notice.empty()
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"分析过程出错: {e}")
+        st.error(f"分析过程出错: {str(e)}")
+        return []
 
 def display_results(results):
     """显示分析结果"""
@@ -147,9 +198,14 @@ with st.sidebar:
         ["综合分析", "资金流向分析", "社交媒体热点分析", "基本面分析", "技术面分析"]
     )
     
-    stock_count = st.slider("推荐股票数量", 3, 20, 10)
+    stock_count = st.slider("推荐股票数量", 3, 10, 5, help="由于API调用频率限制，建议选择较少的股票数量")
+    st.session_state['stock_count'] = stock_count
     
     min_score = st.slider("最低潜力评分", 0, 100, 60)
+    st.session_state['min_score'] = min_score
+    
+    max_stocks = st.slider("最大分析股票数量", 3, 15, 8, help="分析的股票数量越多，等待时间越长（每只股票约需30秒）")
+    st.session_state['max_stocks'] = max_stocks
     
     include_sectors = st.multiselect(
         "包含行业",
