@@ -95,6 +95,9 @@ def run_analysis():
         status_text.text("正在筛选候选股票...")
         candidate_stocks = agent_manager.get_candidate_stocks(data, fund_flow_scores, social_scores, max_stocks)
         
+        # 将候选股票列表保存到session_state中
+        st.session_state['candidate_stocks'] = candidate_stocks
+        
         if not candidate_stocks:
             st.error("无法获取候选股票列表")
             return []
@@ -106,6 +109,7 @@ def run_analysis():
         candidate_df = pd.DataFrame({
             '代码': [stock['code'] for stock in candidate_stocks],
             '名称': [stock['name'] for stock in candidate_stocks],
+            '候选理由': [stock.get('selection_reason', '未知') for stock in candidate_stocks],
             '状态': ['等待分析'] * len(candidate_stocks)
         })
         
@@ -187,9 +191,17 @@ def display_results(results):
                     
                     # 显示详细评分
                     st.subheader("详细评分情况")
+                    
+                    # 获取候选理由
+                    selection_reasons = {}
+                    candidate_stocks = st.session_state.get('candidate_stocks', [])
+                    for stock in candidate_stocks:
+                        selection_reasons[stock['code']] = stock.get('selection_reason', '未知')
+                    
                     score_df = pd.DataFrame({
                         '股票代码': [s['code'] for s in all_stocks],
                         '股票名称': [s['name'] for s in all_stocks],
+                        '候选理由': [selection_reasons.get(s['code'], '未知') for s in all_stocks],
                         '资金流入评分': [s.get('fund_flow_score', 0) for s in all_stocks],
                         '社交热度评分': [s.get('social_score', 0) for s in all_stocks],
                         '基本面评分': [s.get('fundamental_score', 0) for s in all_stocks],

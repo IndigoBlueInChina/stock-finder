@@ -478,6 +478,9 @@ class AgentManager:
                     initial_scores = pd.merge(initial_scores, social_scores, on='代码', how='outer')
             
             # 计算初步评分（资金流向和社交热度的加权平均值）
+            candidate_stocks = None
+            selection_reason = "基于综合热度评分"
+            
             if not initial_scores.empty:
                 # 填充缺失值
                 if 'fund_flow_score' in initial_scores.columns:
@@ -500,6 +503,11 @@ class AgentManager:
                     initial_scores['social_score'] * social_weight
                 ) / total_weight
                 
+                # 为每只股票生成候选理由
+                initial_scores['selection_reason'] = initial_scores.apply(
+                    lambda row: self._generate_selection_reason(row), axis=1
+                )
+                
                 # 筛选出初步评分较高的股票（例如前50名）作为候选
                 candidate_stocks = initial_scores.sort_values('initial_score', ascending=False).head(50)
                 candidate_stock_codes = candidate_stocks['代码'].tolist()
@@ -516,6 +524,7 @@ class AgentManager:
                         stock_list = stock_list.copy()
                         stock_list[code_column] = stock_list[code_column].astype(str)
                         candidate_stock_codes = stock_list[code_column].tolist()
+                        selection_reason = "随机选择"
                     else:
                         logger.error(f"股票列表中没有代码列 (既没有 '代码' 也没有 'code')")
                         return []
@@ -546,21 +555,30 @@ class AgentManager:
                     stock_list = stock_list.copy()
                     stock_list[code_column] = stock_list[code_column].astype(str)
                     
-                    # 为每个候选股票代码获取名称
+                    # 为每个候选股票代码获取名称和候选理由
                     for code in candidate_stock_codes:
                         stock_info = stock_list[stock_list[code_column] == code]
                         name = stock_info[name_column].values[0] if not stock_info.empty and name_column in stock_info.columns else "未知"
+                        
+                        # 获取候选理由
+                        reason = selection_reason
+                        if candidate_stocks is not None and '代码' in candidate_stocks.columns and 'selection_reason' in candidate_stocks.columns:
+                            stock_row = candidate_stocks[candidate_stocks['代码'] == code]
+                            if not stock_row.empty:
+                                reason = stock_row['selection_reason'].values[0]
+                        
                         result.append({
                             'code': code,
-                            'name': name
+                            'name': name,
+                            'selection_reason': reason
                         })
                 else:
                     # 如果没有代码列，只返回代码
                     logger.warning(f"股票列表中没有代码列 (既没有 '{code_column}' 也没有 'code')")
-                    result = [{'code': code, 'name': "未知"} for code in candidate_stock_codes]
+                    result = [{'code': code, 'name': "未知", 'selection_reason': selection_reason} for code in candidate_stock_codes]
             else:
                 # 如果没有股票列表，只返回代码
-                result = [{'code': code, 'name': "未知"} for code in candidate_stock_codes]
+                result = [{'code': code, 'name': "未知", 'selection_reason': selection_reason} for code in candidate_stock_codes]
             
             return result
             
@@ -569,6 +587,38 @@ class AgentManager:
             import traceback
             logger.error(traceback.format_exc())
             return []
+    
+    def _generate_selection_reason(self, row):
+        """为股票生成候选理由
+        
+        Args:
+            row: DataFrame中的一行数据，包含fund_flow_score和social_score
+            
+        Returns:
+            str: 候选理由
+        """
+        fund_flow_score = row.get('fund_flow_score', 0)
+        social_score = row.get('social_score', 0)
+        
+        reasons = []
+        
+        if fund_flow_score >= 70:
+            reasons.append("资金流入强劲")
+        elif fund_flow_score >= 60:
+            reasons.append("资金流入较好")
+        
+        if social_score >= 70:
+            reasons.append("社交热度高")
+        elif social_score >= 60:
+            reasons.append("社交热度较高")
+        
+        if not reasons:
+            if fund_flow_score > social_score:
+                reasons.append("资金流向相对较好")
+            else:
+                reasons.append("社交讨论相对活跃")
+        
+        return "、".join(reasons)
     
     def run_analysis_pipeline(self, top_n=10, min_score=60, max_stocks_to_process=10, candidate_stocks=None):
         """运行完整的分析流程
