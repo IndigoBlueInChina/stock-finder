@@ -892,6 +892,10 @@ class AgentManager:
             # 筛选符合最低评分要求的股票
             filtered_results = [r for r in results if r['potential_score'] >= min_score]
             
+            # 记录日志，显示筛选情况
+            logger.info(f"最低评分要求: {min_score}, 符合要求的股票数量: {len(filtered_results)}")
+            logger.info(f"所有股票评分: {[round(r['potential_score'], 2) for r in results]}")
+            
             # 取前N名
             filtered_results = filtered_results[:top_n]
             
@@ -901,6 +905,14 @@ class AgentManager:
             
             # 缓存结果
             self._cache_results(filtered_results if filtered_results else results[:top_n])
+            
+            # 如果没有符合最低评分要求的股票，但用户设置的最低评分很低（低于30），则返回评分最高的几只股票
+            if not filtered_results and min_score < 30:
+                logger.info(f"没有股票符合最低评分要求 {min_score}，但最低评分设置较低，返回评分最高的 {top_n} 只股票")
+                top_results = results[:top_n]
+                if hasattr(self, 'recommendation_agent') and callable(self.recommendation_agent):
+                    top_results = self.recommendation_agent(top_results)
+                return top_results
             
             return filtered_results
         except Exception as e:

@@ -87,6 +87,9 @@ def run_analysis():
         min_score = st.session_state.get('min_score', 60)
         max_stocks = st.session_state.get('max_stocks', 8)
         
+        # 记录分析参数
+        logger.info(f"分析参数 - 推荐股票数量: {top_n}, 最低潜力评分: {min_score}, 最大分析股票数量: {max_stocks}")
+        
         # 创建一个占位符用于显示技术面分析进度
         tech_analysis_status = st.empty()
         api_limit_notice = st.info("注意：由于API调用频率限制，每次获取股票数据需要等待约30秒，分析过程可能需要较长时间，请耐心等待。")
@@ -134,7 +137,9 @@ def run_analysis():
         agent_manager.set_progress_callback(progress_callback)
         
         # 运行分析流程
+        logger.info(f"开始运行分析流程，最低潜力评分设置为: {min_score}")
         results = agent_manager.run_analysis_pipeline(top_n=top_n, min_score=min_score, max_stocks_to_process=max_stocks, candidate_stocks=candidate_stocks)
+        logger.info(f"分析流程完成，返回结果数量: {len(results)}")
         
         # 更新所有已完成股票的状态
         completed_codes = [result['code'] for result in results]
@@ -161,7 +166,7 @@ def run_analysis():
 def display_results(results):
     """显示分析结果"""
     if not results:
-        st.warning("没有找到符合条件的股票")
+        st.warning("没有找到符合最低潜力评分要求的股票")
         # 尝试从AgentManager获取所有分析过的股票数据
         try:
             agent_manager = st.session_state.get('agent_manager')
@@ -171,6 +176,10 @@ def display_results(results):
                     st.subheader("所有分析过的股票数据")
                     # 转换为DataFrame以便显示
                     df = pd.DataFrame(all_stocks)
+                    
+                    # 确保所有必要的列都存在
+                    if 'current_price' not in df.columns:
+                        df['current_price'] = 0.0
                     
                     # 显示结果表格
                     st.dataframe(
@@ -211,7 +220,14 @@ def display_results(results):
                     })
                     st.dataframe(score_df, hide_index=True)
                     
-                    st.info("以上是所有分析过的股票，但它们的潜力评分未达到设定的最低标准。您可以在侧边栏降低最低潜力评分阈值后重新分析。")
+                    # 获取设置的最低潜力评分
+                    min_score = st.session_state.get('min_score', 60)
+                    max_score = max([s.get('potential_score', 0) for s in all_stocks]) if all_stocks else 0
+                    
+                    if max_score < min_score:
+                        st.info(f"所有分析过的股票潜力评分都未达到设定的最低标准 ({min_score})。最高评分为 {max_score:.2f}。您可以在侧边栏降低最低潜力评分阈值后重新分析。")
+                    else:
+                        st.info(f"虽然有股票潜力评分达到了设定的最低标准 ({min_score})，但可能由于其他原因未被推荐。请检查日志或联系开发者。")
         except Exception as e:
             st.error(f"无法获取分析过的股票数据: {e}")
         return
@@ -244,7 +260,10 @@ def display_results(results):
             col1, col2 = st.columns([2, 1])
             
             with col1:
-                st.markdown(f"**推荐理由**: {stock['reason']}")
+                if 'reason' in stock:
+                    st.markdown(f"**推荐理由**: {stock['reason']}")
+                else:
+                    st.markdown("**推荐理由**: 综合评分较高")
                 
                 st.markdown("### 评分详情")
                 scores_df = pd.DataFrame({
@@ -295,7 +314,7 @@ with st.sidebar:
     stock_count = st.slider("推荐股票数量", 3, 10, 5, help="由于API调用频率限制，建议选择较少的股票数量")
     st.session_state['stock_count'] = stock_count
     
-    min_score = st.slider("最低潜力评分", 0, 100, 60)
+    min_score = st.slider("最低潜力评分", 0, 100, 50, help="设置越低，推荐的股票越多，但质量可能较低")
     st.session_state['min_score'] = min_score
     
     max_stocks = st.slider("最大分析股票数量", 3, 15, 8, help="分析的股票数量越多，等待时间越长（每只股票约需30秒）")
