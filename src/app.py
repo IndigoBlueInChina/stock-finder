@@ -64,6 +64,9 @@ def run_analysis():
         agent_manager = AgentManager(data_manager, analyzer_manager)
         progress_bar.progress(30)
         
+        # 将agent_manager保存到session_state中
+        st.session_state['agent_manager'] = agent_manager
+        
         # 收集数据
         status_text.text("正在收集市场数据...")
         data = agent_manager.collect_data()
@@ -155,6 +158,50 @@ def display_results(results):
     """显示分析结果"""
     if not results:
         st.warning("没有找到符合条件的股票")
+        # 尝试从AgentManager获取所有分析过的股票数据
+        try:
+            agent_manager = st.session_state.get('agent_manager')
+            if agent_manager and hasattr(agent_manager, 'all_analyzed_stocks'):
+                all_stocks = agent_manager.all_analyzed_stocks
+                if all_stocks and len(all_stocks) > 0:
+                    st.subheader("所有分析过的股票数据")
+                    # 转换为DataFrame以便显示
+                    df = pd.DataFrame(all_stocks)
+                    
+                    # 显示结果表格
+                    st.dataframe(
+                        df[['code', 'name', 'current_price', 'potential_score']],
+                        column_config={
+                            'code': '股票代码',
+                            'name': '股票名称',
+                            'current_price': '当前价格',
+                            'potential_score': st.column_config.ProgressColumn(
+                                '潜力评分',
+                                min_value=0,
+                                max_value=100,
+                                format="%d%%",
+                            )
+                        },
+                        hide_index=True
+                    )
+                    
+                    # 显示详细评分
+                    st.subheader("详细评分情况")
+                    score_df = pd.DataFrame({
+                        '股票代码': [s['code'] for s in all_stocks],
+                        '股票名称': [s['name'] for s in all_stocks],
+                        '资金流入评分': [s.get('fund_flow_score', 0) for s in all_stocks],
+                        '社交热度评分': [s.get('social_score', 0) for s in all_stocks],
+                        '基本面评分': [s.get('fundamental_score', 0) for s in all_stocks],
+                        '技术面评分': [s.get('technical_score', 0) for s in all_stocks],
+                        '行业热度评分': [s.get('industry_score', 0) for s in all_stocks],
+                        '潜力总评分': [s.get('potential_score', 0) for s in all_stocks]
+                    })
+                    st.dataframe(score_df, hide_index=True)
+                    
+                    st.info("以上是所有分析过的股票，但它们的潜力评分未达到设定的最低标准。您可以在侧边栏降低最低潜力评分阈值后重新分析。")
+        except Exception as e:
+            st.error(f"无法获取分析过的股票数据: {e}")
         return
     
     # 转换为DataFrame以便显示

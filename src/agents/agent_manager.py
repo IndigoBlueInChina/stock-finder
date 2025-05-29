@@ -59,6 +59,9 @@ class AgentManager:
         
         # 进度回调函数
         self.progress_callback = None
+        
+        # 保存所有分析过的股票数据
+        self.all_analyzed_stocks = []
     
     def set_progress_callback(self, callback: Callable[[int, int, str], None]):
         """设置进度回调函数
@@ -684,6 +687,9 @@ class AgentManager:
             
             logger.info(f"开始逐只分析 {total_stocks} 只股票的技术面数据...")
             
+            # 清空之前的分析结果
+            self.all_analyzed_stocks = []
+            
             for i, stock_code in enumerate(candidate_stock_codes):
                 try:
                     # 记录进度
@@ -768,6 +774,7 @@ class AgentManager:
                     
                     # 获取股票名称
                     stock_name = ""
+                    current_price = 0.0
                     if 'stock_list' in data and not data['stock_list'].empty:
                         stock_list = data['stock_list'].copy()
                         # 检查列名
@@ -780,20 +787,38 @@ class AgentManager:
                             if not stock_info.empty and name_column in stock_info.columns:
                                 stock_name = stock_info[name_column].values[0]
                     
+                    # 获取当前价格
+                    if not fundamental_data.empty:
+                        # 检查列名
+                        code_column = '代码' if '代码' in fundamental_data.columns else 'code'
+                        price_column = '最新价' if '最新价' in fundamental_data.columns else 'close'
+                        
+                        if code_column in fundamental_data.columns and stock_code in fundamental_data[code_column].values:
+                            stock_fund = fundamental_data[fundamental_data[code_column] == stock_code]
+                            if not stock_fund.empty and price_column in stock_fund.columns:
+                                current_price = float(stock_fund[price_column].values[0])
+                    
                     # 计算综合评分（使用分析器管理器的权重）
                     potential_score = self.analyzer_manager.calculate_potential_score(stock_scores)
                     
                     # 添加到结果列表
-                    results.append({
+                    stock_result = {
                         'code': stock_code,
                         'name': stock_name,
+                        'current_price': current_price,
                         'fund_flow_score': stock_scores.get('fund_flow_score', 50),
                         'social_score': stock_scores.get('social_score', 50),
                         'fundamental_score': stock_scores.get('fundamental_score', 50),
                         'technical_score': stock_scores.get('technical_score', 50),
                         'industry_score': stock_scores.get('industry_score', 50),
                         'potential_score': potential_score
-                    })
+                    }
+                    
+                    # 添加到所有分析过的股票列表
+                    self.all_analyzed_stocks.append(stock_result)
+                    
+                    # 添加到结果列表
+                    results.append(stock_result)
                     
                     success_count += 1
                     
@@ -815,19 +840,19 @@ class AgentManager:
             results = sorted(results, key=lambda x: x['potential_score'], reverse=True)
             
             # 筛选符合最低评分要求的股票
-            results = [r for r in results if r['potential_score'] >= min_score]
+            filtered_results = [r for r in results if r['potential_score'] >= min_score]
             
             # 取前N名
-            results = results[:top_n]
+            filtered_results = filtered_results[:top_n]
             
             # 生成推荐理由
-            if hasattr(self, 'recommendation_agent') and callable(self.recommendation_agent):
-                results = self.recommendation_agent(results)
+            if filtered_results and hasattr(self, 'recommendation_agent') and callable(self.recommendation_agent):
+                filtered_results = self.recommendation_agent(filtered_results)
             
             # 缓存结果
-            self._cache_results(results)
+            self._cache_results(filtered_results if filtered_results else results[:top_n])
             
-            return results
+            return filtered_results
         except Exception as e:
             logger.error(f"分析流程执行失败: {e}")
             import traceback
