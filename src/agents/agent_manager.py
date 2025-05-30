@@ -709,15 +709,17 @@ class AgentManager:
             # 获取行业数据
             logger.info("获取行业数据...")
             industry_data = data.get('industry_data', pd.DataFrame())
-            stock_industry_mapping = data.get('stock_industry_mapping', pd.DataFrame())
             
-            # 确保代码列是字符串类型
+            # 只获取候选股票的行业映射数据
+            stock_industry_mapping = data.get('stock_industry_mapping', pd.DataFrame())
             if not stock_industry_mapping.empty:
                 stock_industry_mapping = stock_industry_mapping.copy()
                 # 检查列名
                 code_column = '代码' if '代码' in stock_industry_mapping.columns else 'code'
                 if code_column in stock_industry_mapping.columns:
                     stock_industry_mapping[code_column] = stock_industry_mapping[code_column].astype(str)
+                    # 只保留候选股票的行业映射
+                    stock_industry_mapping = stock_industry_mapping[stock_industry_mapping[code_column].isin(candidate_stock_codes)]
             
             logger.info("分析行业数据...")
             industry_scores = self.analyzer_manager.analyze_industry(industry_data, stock_industry_mapping)
@@ -739,6 +741,35 @@ class AgentManager:
             
             # 清空之前的分析结果
             self.all_analyzed_stocks = []
+            
+            # 获取股票名称和当前价格的映射表
+            stock_names = {}
+            stock_prices = {}
+            
+            # 从股票列表中获取名称
+            if 'stock_list' in data and not data['stock_list'].empty:
+                stock_list = data['stock_list'].copy()
+                # 检查列名
+                code_column = '代码' if '代码' in stock_list.columns else 'code'
+                name_column = '名称' if '名称' in stock_list.columns else 'name'
+                
+                if code_column in stock_list.columns and name_column in stock_list.columns:
+                    stock_list[code_column] = stock_list[code_column].astype(str)
+                    for _, row in stock_list.iterrows():
+                        stock_names[row[code_column]] = row[name_column]
+            
+            # 从基本面数据中获取当前价格
+            if not fundamental_data.empty:
+                # 检查列名
+                code_column = '代码' if '代码' in fundamental_data.columns else 'code'
+                price_column = '最新价' if '最新价' in fundamental_data.columns else 'close'
+                
+                if code_column in fundamental_data.columns and price_column in fundamental_data.columns:
+                    for _, row in fundamental_data.iterrows():
+                        try:
+                            stock_prices[row[code_column]] = float(row[price_column])
+                        except (ValueError, TypeError):
+                            stock_prices[row[code_column]] = 0.0
             
             for i, stock_code in enumerate(candidate_stock_codes):
                 try:
@@ -822,31 +853,9 @@ class AgentManager:
                     # 添加技术面评分
                     stock_scores['technical_score'] = technical_score if isinstance(technical_score, (int, float)) else 50
                     
-                    # 获取股票名称
-                    stock_name = ""
-                    current_price = 0.0
-                    if 'stock_list' in data and not data['stock_list'].empty:
-                        stock_list = data['stock_list'].copy()
-                        # 检查列名
-                        code_column = '代码' if '代码' in stock_list.columns else 'code'
-                        name_column = '名称' if '名称' in stock_list.columns else 'name'
-                        
-                        if code_column in stock_list.columns:
-                            stock_list[code_column] = stock_list[code_column].astype(str)
-                            stock_info = stock_list[stock_list[code_column] == stock_code]
-                            if not stock_info.empty and name_column in stock_info.columns:
-                                stock_name = stock_info[name_column].values[0]
-                    
-                    # 获取当前价格
-                    if not fundamental_data.empty:
-                        # 检查列名
-                        code_column = '代码' if '代码' in fundamental_data.columns else 'code'
-                        price_column = '最新价' if '最新价' in fundamental_data.columns else 'close'
-                        
-                        if code_column in fundamental_data.columns and stock_code in fundamental_data[code_column].values:
-                            stock_fund = fundamental_data[fundamental_data[code_column] == stock_code]
-                            if not stock_fund.empty and price_column in stock_fund.columns:
-                                current_price = float(stock_fund[price_column].values[0])
+                    # 获取股票名称和当前价格
+                    stock_name = stock_names.get(stock_code, "未知")
+                    current_price = stock_prices.get(stock_code, 0.0)
                     
                     # 计算综合评分（使用分析器管理器的权重）
                     potential_score = self.analyzer_manager.calculate_potential_score(stock_scores)
