@@ -463,19 +463,61 @@ class AgentManager:
                 social_scores = social_scores.copy()
                 social_scores['代码'] = social_scores['代码'].astype(str)
             
-            if not fund_flow_scores.empty:
-                if initial_scores.empty:
-                    initial_scores = fund_flow_scores.copy()
-                else:
-                    initial_scores = pd.merge(initial_scores, fund_flow_scores, on='代码', how='outer')
+            # 检查资金流向数据是否有效
+            valid_fund_flow = not fund_flow_scores.empty and 'fund_flow_score' in fund_flow_scores.columns
+            if valid_fund_flow:
+                # 检查资金流向评分是否有变化（不全是默认值）
+                if fund_flow_scores['fund_flow_score'].std() < 0.001:
+                    logger.warning("资金流向评分全部相同，可能是默认值，不作为选股依据")
+                    valid_fund_flow = False
             
-            if not social_scores.empty:
-                if initial_scores.empty:
-                    initial_scores = social_scores.copy()
-                else:
-                    # 确保代码列是字符串类型
-                    initial_scores['代码'] = initial_scores['代码'].astype(str)
-                    initial_scores = pd.merge(initial_scores, social_scores, on='代码', how='outer')
+            # 检查社交热度数据是否有效
+            valid_social = not social_scores.empty and 'social_score' in social_scores.columns
+            if valid_social:
+                # 检查社交热度评分是否有变化（不全是默认值）
+                if social_scores['social_score'].std() < 0.001:
+                    logger.warning("社交热度评分全部相同，可能是默认值，不作为选股依据")
+                    valid_social = False
+            
+            # 根据有效数据构建初始评分
+            if valid_fund_flow and valid_social:
+                # 两种数据都有效，合并它们
+                logger.info("使用资金流向和社交热度数据选股")
+                initial_scores = pd.merge(fund_flow_scores, social_scores, on='代码', how='outer')
+            elif valid_fund_flow:
+                # 只有资金流向数据有效
+                logger.info("仅使用资金流向数据选股")
+                initial_scores = fund_flow_scores.copy()
+                # 添加默认的社交热度评分
+                initial_scores['social_score'] = 50
+            elif valid_social:
+                # 只有社交热度数据有效
+                logger.info("仅使用社交热度数据选股")
+                initial_scores = social_scores.copy()
+                # 添加默认的资金流向评分
+                initial_scores['fund_flow_score'] = 50
+            else:
+                # 两种数据都无效，使用随机选择
+                logger.warning("资金流向和社交热度数据都无效，使用随机选择")
+                stock_list = data.get('stock_list')
+                if stock_list is not None and not stock_list.empty:
+                    # 检查列名，确保使用正确的列名
+                    code_column = '代码' if '代码' in stock_list.columns else 'code'
+                    if code_column in stock_list.columns:
+                        # 确保代码列是字符串类型
+                        stock_list = stock_list.copy()
+                        stock_list[code_column] = stock_list[code_column].astype(str)
+                        
+                        # 创建初始评分DataFrame
+                        initial_scores = pd.DataFrame({
+                            '代码': stock_list[code_column],
+                            'fund_flow_score': np.random.normal(50, 15, size=len(stock_list)),
+                            'social_score': np.random.normal(50, 15, size=len(stock_list))
+                        })
+                        
+                        # 限制评分范围在0-100之间
+                        initial_scores['fund_flow_score'] = np.clip(initial_scores['fund_flow_score'], 0, 100)
+                        initial_scores['social_score'] = np.clip(initial_scores['social_score'], 0, 100)
             
             # 计算初步评分（资金流向和社交热度的加权平均值）
             candidate_stocks = None
@@ -508,11 +550,20 @@ class AgentManager:
                     lambda row: self._generate_selection_reason(row), axis=1
                 )
                 
+                # 记录评分分布情况
+                logger.info(f"资金流向评分统计: 最小={initial_scores['fund_flow_score'].min():.2f}, 最大={initial_scores['fund_flow_score'].max():.2f}, 平均={initial_scores['fund_flow_score'].mean():.2f}, 标准差={initial_scores['fund_flow_score'].std():.2f}")
+                logger.info(f"社交热度评分统计: 最小={initial_scores['social_score'].min():.2f}, 最大={initial_scores['social_score'].max():.2f}, 平均={initial_scores['social_score'].mean():.2f}, 标准差={initial_scores['social_score'].std():.2f}")
+                logger.info(f"综合评分统计: 最小={initial_scores['initial_score'].min():.2f}, 最大={initial_scores['initial_score'].max():.2f}, 平均={initial_scores['initial_score'].mean():.2f}, 标准差={initial_scores['initial_score'].std():.2f}")
+                
                 # 筛选出初步评分较高的股票（例如前50名）作为候选
                 candidate_stocks = initial_scores.sort_values('initial_score', ascending=False).head(50)
                 candidate_stock_codes = candidate_stocks['代码'].tolist()
                 
+                # 记录选出的候选股票信息
+                top_candidates = initial_scores.sort_values('initial_score', ascending=False).head(10)
+                logger.info(f"初步筛选出的前10只股票:\n{top_candidates[['代码', 'fund_flow_score', 'social_score', 'initial_score', 'selection_reason']]}")
                 logger.info(f"初步筛选出 {len(candidate_stock_codes)} 只有热度的股票进行深入分析")
+                logger.info(f"初步筛选出的股票代码: {candidate_stock_codes}")
             else:
                 logger.warning("初步评分为空，将分析所有股票")
                 stock_list = data.get('stock_list')
