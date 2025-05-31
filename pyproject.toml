@@ -25,6 +25,7 @@ streamlit = "^1.45.1"
 loguru = "^0.7.3"
 langchain-community = "^0.3.24"
 langchain-core = "^0.3.62"
+plotly = "^6.1.2"
 
 
 
