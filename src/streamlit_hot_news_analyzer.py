@@ -21,6 +21,7 @@ project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 from src.analyzers.hot_news_fund_flow_analyzer import HotNewsFundFlowAnalyzer
+from src.data_fetchers.data_manager import DataManager
 
 # 配置日志 - 只使用控制台日志
 logger.remove()
@@ -362,7 +363,31 @@ def main():
     本工具分析新闻热点与资金流入的共振效应，帮助发现市场热点和资金流向一致的股票。
     """)
     
-    # 侧边栏参数设置
+    # 初始化会话状态变量
+    if 'news_df' not in st.session_state:
+        st.session_state.news_df = pd.DataFrame()
+    if 'fund_flow_df' not in st.session_state:
+        st.session_state.fund_flow_df = pd.DataFrame()
+    if 'matched_stocks_df' not in st.session_state:
+        st.session_state.matched_stocks_df = pd.DataFrame()
+    if 'matched_concepts_df' not in st.session_state:
+        st.session_state.matched_concepts_df = pd.DataFrame()
+    if 'industry_reports' not in st.session_state:
+        st.session_state.industry_reports = None
+    if "result" not in st.session_state:
+        st.session_state.result = None
+    if "keywords" not in st.session_state:
+        st.session_state.keywords = None
+    if "concepts" not in st.session_state:
+        st.session_state.concepts = None
+    if "last_run" not in st.session_state:
+        st.session_state.last_run = None
+    
+    # 加载环境变量
+    load_dotenv()
+    API_KEY = os.getenv("OPENAI_API_KEY", "")
+    
+    # 创建侧边栏
     with st.sidebar:
         st.header("参数设置")
         news_days = st.slider("新闻天数", min_value=1, max_value=7, value=1, help="获取最近几天的新闻")
@@ -381,82 +406,75 @@ def main():
         
         top_n = st.slider("显示结果数量", min_value=5, max_value=50, value=20, help="显示前N个结果")
         
-        # LLM配置设置
-        st.header("API设置")
-        # 移除显示当前配置的部分
+        # API密钥隐藏处理
+        user_api_key = API_KEY
         
-        # 允许用户覆盖API密钥
-        user_api_key = st.text_input("API密钥", value="", type="password", 
-                                     help="用于生成行业主题报告")
-        
+        # 添加运行按钮
         run_button = st.button("运行分析", type="primary")
-    
-    # 初始化会话状态
-    if "result" not in st.session_state:
-        st.session_state.result = None
-    if "keywords" not in st.session_state:
-        st.session_state.keywords = None
-    if "concepts" not in st.session_state:
-        st.session_state.concepts = None
-    if "news" not in st.session_state:
-        st.session_state.news = None
-    if "last_run" not in st.session_state:
-        st.session_state.last_run = None
-    if "industry_reports" not in st.session_state:
-        st.session_state.industry_reports = None
-    
-    # 运行分析
-    if run_button:
-        with st.spinner("正在分析热点新闻和资金流向..."):
-            # 创建分析器
-            analyzer = HotNewsFundFlowAnalyzer()
-            
-            # 获取热点新闻
-            news_df = analyzer.get_hot_news(days=news_days)
-            st.session_state.news = news_df
-            
-            # 提取关键词
-            keywords_dict = analyzer.extract_keywords_from_news(news_df)
-            st.session_state.keywords = keywords_dict
-            
-            # 匹配概念板块
-            matched_concepts = analyzer.match_keywords_with_concepts(keywords_dict)
-            st.session_state.concepts = matched_concepts
-            
-            # 运行分析
-            result = analyzer.analyze(
-                news_days=news_days, 
-                fund_flow_days_list=fund_flow_days_list, 
-                top_n=top_n
-            )
-            
-            st.session_state.result = result
-            st.session_state.last_run = {
-                "news_days": news_days,
-                "fund_flow_days_list": fund_flow_days_list,
-                "top_n": top_n,
-                "time": time.strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            # 检查是否有有效的LLM配置
-            api_key = user_api_key or API_KEY
-            if api_key and api_key != "your_openai_api_key":
-                with st.spinner("正在生成行业主题报告..."):
-                    st.session_state.industry_reports = generate_industry_reports(
-                        news_df, 
-                        result, 
-                        matched_concepts,
-                        api_key
+        
+        if run_button:
+            with st.spinner("正在分析热点新闻和资金流向..."):
+                try:
+                    # 创建分析器
+                    analyzer = HotNewsFundFlowAnalyzer()
+                    
+                    # 获取热点新闻
+                    news_df = analyzer.get_hot_news(days=news_days)
+                    st.session_state.news_df = news_df
+                    
+                    # 提取关键词
+                    keywords_dict = analyzer.extract_keywords_from_news(news_df)
+                    st.session_state.keywords = keywords_dict
+                    
+                    # 匹配概念板块
+                    matched_concepts = analyzer.match_keywords_with_concepts(keywords_dict)
+                    st.session_state.concepts = matched_concepts
+                    
+                    # 运行分析
+                    result = analyzer.analyze(
+                        news_days=news_days, 
+                        fund_flow_days_list=fund_flow_days_list, 
+                        top_n=top_n
                     )
+                    
+                    st.session_state.result = result
+                    st.session_state.matched_stocks_df = result
+                    st.session_state.matched_concepts_df = matched_concepts
+                    st.session_state.last_run = {
+                        "news_days": news_days,
+                        "fund_flow_days_list": fund_flow_days_list,
+                        "top_n": top_n,
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    
+                    # 获取资金流向数据
+                    data_manager = DataManager()
+                    st.session_state.fund_flow_df = data_manager.get_fund_flow_data()
+                    
+                    # 检查是否有有效的LLM配置
+                    api_key = user_api_key or API_KEY
+                    if api_key and api_key != "your_openai_api_key":
+                        with st.spinner("正在生成行业主题报告..."):
+                            st.session_state.industry_reports = generate_industry_reports(
+                                news_df, 
+                                result, 
+                                matched_concepts,
+                                api_key
+                            )
+                    
+                    st.success("分析完成！")
+                except Exception as e:
+                    st.error(f"分析过程中出错: {str(e)}")
+                    logger.error(f"分析过程中出错: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
     
     # 显示结果
     if st.session_state.result is not None and not st.session_state.result.empty:
-        st.success(f"分析完成! 发现 {len(st.session_state.result)} 只热点股票")
-        
         if st.session_state.last_run:
             st.caption(f"最后运行时间: {st.session_state.last_run['time']}")
         
-        # 创建选项卡
+        # 创建主要内容区域的选项卡
         tab1, tab2, tab3, tab4, tab5 = st.tabs(["热点股票", "热点概念", "新闻关键词", "原始新闻", "行业主题报告"])
         
         # 选项卡1: 热点股票
@@ -618,24 +636,25 @@ def main():
         
         # 选项卡4: 原始新闻
         with tab4:
-            if st.session_state.news is not None and not st.session_state.news.empty:
+            if st.session_state.news_df is not None and not st.session_state.news_df.empty:
                 st.subheader("热点新闻列表")
                 
                 # 显示新闻来源分布
-                news_source_count = st.session_state.news['来源'].value_counts().reset_index()
-                news_source_count.columns = ['来源', '数量']
-                
-                fig = px.pie(
-                    news_source_count,
-                    values='数量',
-                    names='来源',
-                    title="热点新闻来源分布"
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                if '来源' in st.session_state.news_df.columns:
+                    news_source_count = st.session_state.news_df['来源'].value_counts().reset_index()
+                    news_source_count.columns = ['来源', '数量']
+                    
+                    fig = px.pie(
+                        news_source_count,
+                        values='数量',
+                        names='来源',
+                        title="热点新闻来源分布"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
                 
                 # 显示新闻表格
                 st.dataframe(
-                    st.session_state.news,
+                    st.session_state.news_df,
                     use_container_width=True,
                     column_config={
                         "标题": st.column_config.TextColumn("新闻标题"),
@@ -651,7 +670,7 @@ def main():
             # 检查LLM配置是否有效
             api_key = user_api_key or API_KEY
             if not api_key or api_key == "your_openai_api_key":
-                st.warning("请在侧边栏或环境变量中设置有效的API密钥以使用行业主题报告功能")
+                st.warning("请在环境变量中设置有效的API密钥以使用行业主题报告功能")
             elif st.session_state.industry_reports:
                 st.subheader("行业主题报告")
                 
@@ -665,7 +684,7 @@ def main():
                         title = "行业主题报告"
                         if "主题名称:" in report or "主题名称：" in report:
                             for line in report.split("\n"):
-                                if "主题名称:" in line or "主题名称：" in line:
+                                if line.startswith("主题名称:") or line.startswith("主题名称："):
                                     title = line.split(":", 1)[1].strip() if ":" in line else line.split("：", 1)[1].strip()
                                     break
                         
@@ -673,15 +692,15 @@ def main():
                         with st.expander(title, expanded=i==0):
                             # 使用markdown格式显示报告内容
                             st.markdown(report.strip())
-                            st.divider()
+                        st.divider()
             else:
                 # 添加手动生成按钮
                 if st.button("生成行业主题报告"):
                     with st.spinner("正在生成行业主题报告..."):
                         st.session_state.industry_reports = generate_industry_reports(
-                            st.session_state.news, 
-                            st.session_state.result, 
-                            st.session_state.concepts,
+                            st.session_state.news_df, 
+                            st.session_state.matched_stocks_df, 
+                            st.session_state.matched_concepts_df,
                             api_key
                         )
                         st.experimental_rerun()
