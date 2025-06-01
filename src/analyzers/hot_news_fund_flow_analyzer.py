@@ -188,33 +188,67 @@ class HotNewsFundFlowAnalyzer:
                 
             cache_file = self.cache_dir / f"fund_flow_{days}d.csv"
             
-            # 如果缓存文件存在且当天已更新，直接读取
-            if cache_file.exists() and (datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime)).seconds < 3600:
-                logger.info(f"从缓存读取资金流向数据 ({days}天)")
-                fund_flow_dict[days] = pd.read_csv(cache_file)
-                continue
+            # 如果缓存文件存在，先尝试使用缓存
+            if cache_file.exists():
+                try:
+                    # 检查缓存是否过期（超过6小时）
+                    cache_age = datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime)
+                    if cache_age.seconds < 21600:  # 6小时 = 21600秒
+                        logger.info(f"从缓存读取资金流向数据 ({days}天)")
+                        fund_flow_dict[days] = pd.read_csv(cache_file)
+                        continue
+                    else:
+                        logger.info(f"缓存数据已过期 ({days}天)，尝试获取最新数据")
+                except Exception as e:
+                    logger.warning(f"读取缓存文件失败: {e}，尝试获取最新数据")
             
-            try:
-                logger.info(f"获取{days}天资金流向数据")
-                indicator = days_map[days]
-                fund_flow = ak.stock_individual_fund_flow_rank(indicator=indicator)
-                
-                if not fund_flow.empty:
-                    # 保存到缓存
-                    fund_flow.to_csv(cache_file, index=False)
-                    fund_flow_dict[days] = fund_flow
-                else:
-                    logger.warning(f"获取{days}天资金流向数据为空")
-            except Exception as e:
-                logger.error(f"获取{days}天资金流向数据失败: {e}")
-                
-                # 如果缓存存在，尝试使用缓存
-                if cache_file.exists():
-                    logger.warning(f"使用缓存的{days}天资金流向数据")
-                    fund_flow_dict[days] = pd.read_csv(cache_file)
+            # 重试参数
+            max_retries = 3
+            base_delay = 2  # 初始延迟2秒
+            
+            for retry in range(max_retries):
+                try:
+                    logger.info(f"获取{days}天资金流向数据 (尝试 {retry+1}/{max_retries})")
+                    
+                    # 设置更长的超时时间
+                    import akshare as ak
+                    import importlib
+                    importlib.reload(ak)  # 重新加载akshare模块，避免之前的超时设置影响
+                    
+                    # 使用更长的超时时间
+                    indicator = days_map[days]
+                    fund_flow = ak.stock_individual_fund_flow_rank(indicator=indicator, timeout=30)
+                    
+                    if not fund_flow.empty:
+                        # 保存到缓存
+                        fund_flow.to_csv(cache_file, index=False)
+                        fund_flow_dict[days] = fund_flow
+                        logger.info(f"成功获取{days}天资金流向数据，共 {len(fund_flow)} 条记录")
+                        break
+                    else:
+                        logger.warning(f"获取{days}天资金流向数据为空")
+                        # 如果是最后一次重试，尝试使用缓存
+                        if retry == max_retries - 1 and cache_file.exists():
+                            logger.warning(f"使用缓存的{days}天资金流向数据")
+                            fund_flow_dict[days] = pd.read_csv(cache_file)
+                        
+                except Exception as e:
+                    logger.error(f"获取{days}天资金流向数据失败: {e}")
+                    
+                    # 如果不是最后一次重试，等待后重试
+                    if retry < max_retries - 1:
+                        # 指数退避策略
+                        wait_time = base_delay * (2 ** retry) + np.random.uniform(0, 1)
+                        logger.info(f"等待 {wait_time:.2f} 秒后重试...")
+                        time.sleep(wait_time)
+                    else:
+                        # 最后一次重试失败，尝试使用缓存
+                        if cache_file.exists():
+                            logger.warning(f"使用缓存的{days}天资金流向数据")
+                            fund_flow_dict[days] = pd.read_csv(cache_file)
             
             # 添加延时，避免请求过于频繁
-            time.sleep(1)
+            time.sleep(2)  # 增加延时到2秒
         
         return fund_flow_dict
     
@@ -415,26 +449,92 @@ class HotNewsFundFlowAnalyzer:
         Returns:
             pandas.DataFrame: 包含股票代码、名称等信息的DataFrame
         """
-        try:
-            logger.info(f"获取概念板块 {concept_name} 的成分股")
-            concept_stocks = ak.stock_board_concept_cons_em(symbol=concept_name)
-            
-            if not concept_stocks.empty:
-                # 确保包含必要的列
-                if '代码' in concept_stocks.columns:
-                    # 确保代码列是字符串类型
-                    concept_stocks['代码'] = concept_stocks['代码'].astype(str)
+        # 创建缓存文件名，将概念名称中的特殊字符替换为下划线
+        safe_concept_name = re.sub(r'[\\/:*?"<>|]', '_', concept_name)
+        cache_file = self.cache_dir / f"concept_{safe_concept_name}.csv"
+        
+        # 如果缓存文件存在，先尝试使用缓存
+        if cache_file.exists():
+            try:
+                # 检查缓存是否过期（超过7天）
+                cache_age = datetime.now() - datetime.fromtimestamp(cache_file.stat().st_mtime)
+                if cache_age.days < 7:  # 概念股变化不频繁，缓存可以保留7天
+                    logger.info(f"从缓存读取概念板块 {concept_name} 的成分股")
+                    concept_stocks = pd.read_csv(cache_file)
                     
-                    # 确保代码格式正确（6位数字）
-                    concept_stocks['代码'] = concept_stocks['代码'].apply(lambda x: x.zfill(6) if x.isdigit() else x)
+                    # 确保包含必要的列
+                    if '代码' in concept_stocks.columns:
+                        # 确保代码列是字符串类型
+                        concept_stocks['代码'] = concept_stocks['代码'].astype(str)
+                        
+                        # 确保代码格式正确（6位数字）
+                        concept_stocks['代码'] = concept_stocks['代码'].apply(lambda x: x.zfill(6) if x.isdigit() else x)
+                    
+                    return concept_stocks
+                else:
+                    logger.info(f"概念板块 {concept_name} 缓存数据已过期，尝试获取最新数据")
+            except Exception as e:
+                logger.warning(f"读取概念板块 {concept_name} 缓存文件失败: {e}，尝试获取最新数据")
+        
+        # 重试参数
+        max_retries = 3
+        base_delay = 2  # 初始延迟2秒
+        
+        for retry in range(max_retries):
+            try:
+                logger.info(f"获取概念板块 {concept_name} 的成分股 (尝试 {retry+1}/{max_retries})")
                 
-                return concept_stocks
-            else:
-                logger.warning(f"概念板块 {concept_name} 成分股为空")
-                return pd.DataFrame()
-        except Exception as e:
-            logger.error(f"获取概念板块 {concept_name} 成分股失败: {e}")
-            return pd.DataFrame()
+                # 设置更长的超时时间
+                import akshare as ak
+                import importlib
+                importlib.reload(ak)  # 重新加载akshare模块，避免之前的超时设置影响
+                
+                # 使用更长的超时时间
+                concept_stocks = ak.stock_board_concept_cons_em(symbol=concept_name, timeout=30)
+                
+                if not concept_stocks.empty:
+                    # 确保包含必要的列
+                    if '代码' in concept_stocks.columns:
+                        # 确保代码列是字符串类型
+                        concept_stocks['代码'] = concept_stocks['代码'].astype(str)
+                        
+                        # 确保代码格式正确（6位数字）
+                        concept_stocks['代码'] = concept_stocks['代码'].apply(lambda x: x.zfill(6) if x.isdigit() else x)
+                    
+                    # 保存到缓存
+                    concept_stocks.to_csv(cache_file, index=False)
+                    logger.info(f"成功获取概念板块 {concept_name} 的成分股，共 {len(concept_stocks)} 只股票")
+                    
+                    return concept_stocks
+                else:
+                    logger.warning(f"概念板块 {concept_name} 成分股为空")
+                    # 如果是最后一次重试，检查是否有缓存可用
+                    if retry == max_retries - 1 and cache_file.exists():
+                        logger.warning(f"使用缓存的概念板块 {concept_name} 成分股数据")
+                        return pd.read_csv(cache_file)
+                    elif retry == max_retries - 1:
+                        return pd.DataFrame()
+            
+            except Exception as e:
+                logger.error(f"获取概念板块 {concept_name} 成分股失败: {e}")
+                
+                # 如果不是最后一次重试，等待后重试
+                if retry < max_retries - 1:
+                    # 指数退避策略
+                    wait_time = base_delay * (2 ** retry) + np.random.uniform(0, 1)
+                    logger.info(f"等待 {wait_time:.2f} 秒后重试...")
+                    time.sleep(wait_time)
+                else:
+                    # 最后一次重试失败，尝试使用缓存
+                    if cache_file.exists():
+                        logger.warning(f"使用缓存的概念板块 {concept_name} 成分股数据")
+                        try:
+                            return pd.read_csv(cache_file)
+                        except Exception as ce:
+                            logger.error(f"读取缓存文件失败: {ce}")
+                    
+                    # 如果没有缓存或读取缓存失败，返回空DataFrame
+                    return pd.DataFrame()
     
     def analyze(self, news_days=1, fund_flow_days_list=[1, 3, 5], top_n=100):
         """分析新闻热点与资金流入的共振效应
@@ -465,8 +565,24 @@ class HotNewsFundFlowAnalyzer:
         # 6. 获取匹配概念板块的所有成分股
         concept_stocks = pd.DataFrame()
         
+        # 检查网络连接状态，决定获取多少概念板块
+        network_issues = False
+        for days, fund_flow in fund_flow_dict.items():
+            if fund_flow.empty:
+                # 如果资金流向数据获取失败，可能存在网络问题
+                network_issues = True
+                break
+        
+        # 根据网络状态决定获取的概念板块数量
+        max_concepts = 5 if network_issues else 10
+        logger.info(f"网络状态检查: {'存在问题' if network_issues else '正常'}, 将获取前 {max_concepts} 个概念板块")
+        
         if not matched_concepts.empty:
-            for _, concept_row in matched_concepts.head(10).iterrows():  # 只处理前10个匹配度最高的概念板块
+            # 记录失败次数，如果连续失败超过限制，停止获取
+            failure_count = 0
+            max_failures = 2
+            
+            for _, concept_row in matched_concepts.head(max_concepts).iterrows():
                 concept_name = concept_row['概念板块']
                 concept_score = concept_row['新闻匹配分数']
                 
@@ -483,9 +599,21 @@ class HotNewsFundFlowAnalyzer:
                         concept_stocks = stocks.copy()
                     else:
                         concept_stocks = pd.concat([concept_stocks, stocks])
+                    
+                    # 重置失败计数
+                    failure_count = 0
+                else:
+                    # 增加失败计数
+                    failure_count += 1
+                    logger.warning(f"获取概念板块 {concept_name} 成分股失败，失败计数: {failure_count}/{max_failures}")
+                    
+                    # 如果连续失败超过限制，停止获取
+                    if failure_count >= max_failures:
+                        logger.warning(f"连续 {max_failures} 次获取概念板块成分股失败，停止获取更多概念板块")
+                        break
                 
                 # 添加延时，避免请求过于频繁
-                time.sleep(1)
+                time.sleep(2)  # 增加延时到2秒
         
         # 7. 合并直接匹配的股票和通过概念板块匹配的股票
         all_matched_stocks = pd.DataFrame()
@@ -558,48 +686,55 @@ class HotNewsFundFlowAnalyzer:
             
             # 如果有需要合并的列，进行合并
             if len(columns_to_merge) > 1:
-                # 使用左连接合并，保留所有匹配的股票
-                result = pd.merge(result, fund_flow[columns_to_merge], on='代码', how='left')
+                try:
+                    # 使用左连接合并，保留所有匹配的股票
+                    result = pd.merge(result, fund_flow[columns_to_merge], on='代码', how='left')
+                except Exception as e:
+                    logger.error(f"合并资金流向数据失败: {e}")
         
         # 10. 计算综合得分
         if not result.empty:
-            # 初始化综合得分为新闻匹配分数
-            result['综合得分'] = result['新闻匹配分数']
-            
-            # 添加资金流入得分
-            for days in fund_flow_days_list:
-                if days == 1:
-                    prefix = '今日'
-                    weight = 1.0  # 今日资金流入权重最高
-                elif days == 3:
-                    prefix = '3日'
-                    weight = 0.8  # 3日资金流入权重次之
-                elif days == 5:
-                    prefix = '5日'
-                    weight = 0.6  # 5日资金流入权重再次
-                else:
-                    prefix = f'{days}日'
-                    weight = 0.4  # 其他天数资金流入权重最低
+            try:
+                # 初始化综合得分为新闻匹配分数
+                result['综合得分'] = result['新闻匹配分数']
                 
-                # 主力净流入-净额
-                col = f'{prefix}主力净流入-净额'
-                if col in result.columns:
-                    # 将净额转换为百万元单位，并加权
-                    result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0)
-                    result['综合得分'] += result[col] / 1000000 * weight
+                # 添加资金流入得分
+                for days in fund_flow_days_list:
+                    if days == 1:
+                        prefix = '今日'
+                        weight = 1.0  # 今日资金流入权重最高
+                    elif days == 3:
+                        prefix = '3日'
+                        weight = 0.8  # 3日资金流入权重次之
+                    elif days == 5:
+                        prefix = '5日'
+                        weight = 0.6  # 5日资金流入权重再次
+                    else:
+                        prefix = f'{days}日'
+                        weight = 0.4  # 其他天数资金流入权重最低
+                    
+                    # 主力净流入-净额
+                    col = f'{prefix}主力净流入-净额'
+                    if col in result.columns:
+                        # 将净额转换为百万元单位，并加权
+                        result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0)
+                        result['综合得分'] += result[col] / 1000000 * weight
+                    
+                    # 主力净流入-净占比
+                    col = f'{prefix}主力净流入-净占比'
+                    if col in result.columns:
+                        # 将净占比直接加权
+                        result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0)
+                        result['综合得分'] += result[col] * weight * 5
                 
-                # 主力净流入-净占比
-                col = f'{prefix}主力净流入-净占比'
-                if col in result.columns:
-                    # 将净占比直接加权
-                    result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0)
-                    result['综合得分'] += result[col] * weight * 5
-            
-            # 按综合得分降序排序
-            result = result.sort_values('综合得分', ascending=False)
-            
-            # 只保留前top_n个结果
-            result = result.head(top_n)
+                # 按综合得分降序排序
+                result = result.sort_values('综合得分', ascending=False)
+                
+                # 只返回前top_n个结果
+                if len(result) > top_n:
+                    result = result.head(top_n)
+            except Exception as e:
+                logger.error(f"计算综合得分失败: {e}")
         
         return result
 
